@@ -1918,7 +1918,12 @@ resetNode('sw-global-reset').addEventListener('click', async () => {
   if(globalResetBusy || !globalResetState || typeof globalResetState.notifications !== 'boolean') return;
   const want = !globalResetState.notifications;
   globalResetBusy = true; renderResetTracker();
-  try { await invoke('set_global_reset_notifications', { on:want }); await refreshResetTracker(); toast(); }
+  try {
+    const on = await invoke('set_global_reset_notifications', { on:want });
+    if(typeof on === 'boolean' && globalResetState) globalResetState = { ...globalResetState, notifications:on };
+    await refreshResetTracker();
+    if(globalResetState && globalResetState.notifications === want) toast();
+  }
   catch(e) { strip('Global reset notifications could not be changed: ' + errText(e)); }
   finally { globalResetBusy = false; renderResetTracker(); }
 });

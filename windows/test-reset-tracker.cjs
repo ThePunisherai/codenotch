@@ -151,3 +151,13 @@ test('preview uses the global command and re-enables the button on an error', as
   assert.equal(button.disabled, false);
   assert.match(page.context.lastError, /Test notification failed/);
 });
+
+test('notification toggle displays the persisted command result when a follow-up read fails', async () => {
+  const page = view(command => command === 'set_global_reset_notifications' ? Promise.resolve(false) : Promise.reject(new Error('read unavailable')));
+  page.render(state);
+  await page.node('sw-global-reset').handlers.click();
+  assert.equal(page.calls[0][0], 'set_global_reset_notifications');
+  assert.equal(page.calls[0][1].on, false);
+  assert.equal(page.node('sw-global-reset').attributes['aria-checked'], 'false');
+  assert.equal(page.node('sw-global-reset').disabled, false);
+});
