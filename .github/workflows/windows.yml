@@ -75,6 +75,9 @@ jobs:
       - name: Test reset notification card
         run: node --test test-reset-card.cjs
 
+      - name: Test Codex reset tracker
+        run: node --test test-reset-tracker.cjs
+
       # Reported rather than enforced: the crate already carries warnings, and
       # failing on them would hold every change hostage to that cleanup.
       - name: Clippy

@@ -1,3 +1,8 @@
+> **Windows Reset Tracker in this fork:** Codex / ChatGPT Work global reset tracking,
+> personal reset clocks, and notification previews are included in the Windows
+> app. See [Windows instructions](windows/README.md#codex--chatgpt-work-reset-tracker-this-fork)
+> and [Windows builds](https://github.com/ThePunisherai/codenotch/actions).
+
 <div align="center">
 
 ![Codenotch](docs/design/codenotch-banner.png)

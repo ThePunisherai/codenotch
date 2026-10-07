@@ -45,6 +45,20 @@
   .dot{width:8px;height:8px;flex:none;border-radius:50%;background:var(--ample)}
   #next{font-size:11px;color:var(--muted);margin:8px 0 0 16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   #next:empty{display:none}
+  #next-row{display:flex;align-items:center;justify-content:space-between;gap:6px;min-width:0}
+  #next-row #next{min-width:0}
+  #source{flex:none;border:0;padding:0;background:transparent;color:var(--ample);font:inherit;font-size:9px;cursor:pointer}
+  #source:hover{text-decoration:underline}
+  #source:focus-visible{outline:2px solid var(--focus);outline-offset:2px;border-radius:2px}
+  #source[hidden]{display:none}
+  body[data-scope="global"] #card{background:linear-gradient(125deg,rgba(55,178,131,.13),transparent 80%),var(--card);border-color:var(--ample)}
+  body[data-scope="global"] #glyph{width:28px;height:28px;background:rgba(55,178,131,.13);border-radius:8px;color:var(--ample)}
+  body[data-scope="global"] #glyph svg{width:19px;height:19px}
+  body[data-scope="global"] .title{font-size:12px}
+  body[data-scope="global"] .subtitle{font-size:10px}
+  body[data-scope="global"] .status{margin-top:10px;font-size:11px}
+  body[data-scope="global"] #next{font-size:9px;margin-top:8px;margin-left:0}
+  body[data-scope="global"] #source{margin-top:8px}
   @media (prefers-reduced-motion: no-preference){#card{animation:appear .18s ease-out both}@keyframes appear{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}}
 </style>
 </head>
@@ -56,7 +70,7 @@
     <button id="dismiss" type="button" aria-label="Dismiss"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 3l10 10M13 3L3 13"/></svg></button>
   </div>
   <div class="status"><span class="dot" aria-hidden="true"></span><span id="status"></span></div>
-  <div id="next"></div>
+  <div id="next-row"><div id="next"></div><button id="source" type="button" hidden></button></div>
 </div>
 <div id="tail" aria-hidden="true"></div>
 <script>
@@ -70,11 +84,21 @@ const data = window.__RESET_ALERT__ || {
 document.documentElement.lang = data.lang || 'en';
 document.body.dataset.edge = ['left','right','top','bottom'].includes(data.edge) ? data.edge : 'right';
 document.body.dataset.attached = data.attached ? 'true' : 'false';
+const globalAnnouncement = data.scope === 'global' || data.kind === 'global_reset';
+document.body.dataset.scope = globalAnnouncement ? 'global' : 'personal';
 document.getElementById('title').textContent = data.title;
+document.getElementById('title').setAttribute('title', data.title || '');
 document.getElementById('subtitle').textContent = data.subtitle;
 document.getElementById('status').textContent = data.status;
 document.getElementById('next').textContent = data.next || '';
 document.getElementById('dismiss').setAttribute('aria-label', data.dismiss_label || 'Dismiss');
+const source = document.getElementById('source');
+source.hidden = !globalAnnouncement || !data.source_label;
+source.textContent = data.source_label || '';
+source.addEventListener('click', () => {
+  if(!globalAnnouncement) return;
+  window.__TAURI__?.core?.invoke('open_global_reset_source').catch(() => {});
+});
 const glyph = data.glyph || {};
 const glyphEl = document.getElementById('glyph');
 if(glyph.kind === 'svg' && typeof glyph.svg === 'string' && glyph.svg.startsWith('<svg')){

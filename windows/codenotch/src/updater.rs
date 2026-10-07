@@ -8,7 +8,7 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 use tauri_plugin_updater::UpdaterExt;
 
-const RELEASE_API: &str = "https://api.github.com/repos/vinzdg/codenotch/releases/latest";
+const RELEASE_API: &str = "https://api.github.com/repos/ThePunisherai/codenotch/releases/latest";
 const INSTALLER_NAME: &str = "Codenotch-Setup.exe";
 const UNSET_PUBKEY: &str = "REPLACE_WITH_TAURI_PUBLIC_KEY";
 const CHECK_ERROR: &str = "Could not check for updates";
@@ -225,7 +225,7 @@ pub fn open_update_installer() -> Result<(), String> {
     };
     let version = Version::parse(&version).map_err(|e| e.to_string())?;
     let url = format!(
-        "https://github.com/vinzdg/codenotch/releases/download/v{version}/{INSTALLER_NAME}"
+        "https://github.com/ThePunisherai/codenotch/releases/download/v{version}/{INSTALLER_NAME}"
     );
     let mut command = std::process::Command::new("cmd");
     command.args(["/C", "start", "", &url]);

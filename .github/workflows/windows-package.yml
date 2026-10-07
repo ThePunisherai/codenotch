@@ -50,7 +50,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node scripts/test-claude-auth-ui.cjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node --test test-light-surface.cjs test-carry.cjs test-codex-headline.cjs test-reset-card.cjs scripts/test-ko-i18n.cjs
+          node --test test-light-surface.cjs test-carry.cjs test-codex-headline.cjs test-reset-card.cjs test-reset-tracker.cjs scripts/test-ko-i18n.cjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       # Keep the existing toolchain action pin so a branch preview uses the

@@ -55,6 +55,7 @@
   .b-indigo{background:linear-gradient(#8784ff,#5856d6)}
   .b-gray{background:linear-gradient(#a6a6ab,#727277)}
   .b-red{background:linear-gradient(#ff6d62,#dd3328)}
+  .b-mint{background:linear-gradient(#45cba9,#0a9476)}
 
   /* ---- pane ---- */
   #pane{flex:1;display:flex;flex-direction:column;min-width:0}
@@ -125,6 +126,60 @@
   #toast{position:fixed;right:18px;bottom:14px;background:var(--side);border:1px solid var(--line);border-radius:8px;
     padding:5px 10px;font-size:12px;color:var(--text2);opacity:0;transition:opacity .3s;pointer-events:none}
   #toast.show{opacity:1}
+
+  /* Reset tracker: calm emerald for announcements, blue for the user's own windows. */
+  #pane-resets{--reset-green:#61e1bb;--reset-soft:rgba(66,207,161,.13);--reset-blue:#8ab9ff}
+  :root[data-theme="light"] #pane-resets{--reset-green:#007f61;--reset-soft:rgba(0,141,106,.08);--reset-blue:#1665ce}
+  .reset-hero{position:relative;isolation:isolate;overflow:hidden;border-radius:15px;border:1px solid rgba(86,212,174,.24);
+    padding:17px 18px;background:linear-gradient(115deg,var(--reset-soft),var(--group));margin:6px 0 15px}
+  .reset-hero::before{content:"";position:absolute;right:-40px;top:-75px;width:180px;height:180px;border-radius:50%;
+    border:24px solid rgba(75,211,167,.07);z-index:-1}
+  .reset-eyebrow{display:flex;align-items:center;justify-content:space-between;gap:8px;color:var(--reset-green);font-size:10px;
+    font-weight:700;letter-spacing:1.35px;text-transform:uppercase}
+  .reset-feed{display:inline-flex;align-items:center;gap:5px;color:var(--text2);font-size:10px;font-weight:500;letter-spacing:0;text-transform:none}
+  .reset-feed::before{content:"";width:5px;height:5px;border-radius:50%;background:var(--text3)}
+  .reset-feed[data-status="ok"]::before{background:var(--reset-green);box-shadow:0 0 0 3px var(--reset-soft)}
+  .reset-hero-main{display:flex;align-items:flex-start;gap:12px;margin-top:16px}
+  .reset-orbit{display:grid;place-items:center;width:37px;height:37px;flex:none;border-radius:50%;background:var(--reset-soft);color:var(--reset-green)}
+  .reset-orbit svg{width:19px;height:19px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+  .reset-hero h2{margin:0;font-size:21px;font-weight:650;letter-spacing:-.5px;line-height:1.15}
+  .reset-hero-time{margin-top:4px;font-size:12px;color:var(--text2)}
+  .reset-summary{font-size:12px;line-height:1.5;margin:12px 0;color:var(--text2);overflow-wrap:anywhere}
+  .reset-foot{display:flex;justify-content:space-between;align-items:center;gap:10px;border-top:1px solid var(--line);padding-top:10px;font-size:10px;color:var(--text2)}
+  .reset-foot .link{font-size:10px}
+  .reset-chapter{display:flex;align-items:baseline;justify-content:space-between;margin:17px 1px 8px;gap:8px}
+  .reset-chapter h2{margin:0;font-size:13px;font-weight:600}
+  .reset-tag{font-size:10px;color:var(--text2);background:var(--seg-bg);border-radius:5px;padding:2px 6px;white-space:nowrap}
+  .reset-cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+  .reset-personal{background:var(--group);border:1px solid var(--line);border-radius:10px;padding:12px;min-width:0}
+  .reset-personal-name{display:flex;justify-content:space-between;align-items:center;gap:5px;font-size:11px;color:var(--text2)}
+  .reset-personal-percent{color:var(--text);font-variant-numeric:tabular-nums;font-size:10px}
+  .reset-countdown{font-size:21px;font-weight:600;letter-spacing:-.45px;color:var(--reset-blue);font-variant-numeric:tabular-nums;margin:5px 0 6px}
+  .reset-countdown.waiting{font-size:13px;letter-spacing:0;color:var(--text2)}
+  .reset-meter{height:3px;background:var(--seg-bg);border-radius:2px;overflow:hidden}
+  .reset-meter span{display:block;height:100%;background:var(--reset-blue);border-radius:2px}
+  .reset-personal-time{font-size:10px;color:var(--text2);margin-top:6px;overflow-wrap:anywhere}
+  .reset-note{margin:7px 2px;font-size:11px;line-height:1.5;color:var(--text2);overflow-wrap:anywhere}
+  .reset-empty{padding:14px;font-size:12px;color:var(--text2);border:1px dashed var(--line);border-radius:10px;grid-column:1/-1}
+  .reset-forecast{background:var(--group);border:1px solid var(--line);border-radius:10px;padding:12px}
+  .reset-probabilities{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .reset-probability + .reset-probability{border-left:1px solid var(--line);padding-left:16px}
+  .reset-probability strong{font-size:25px;letter-spacing:-.8px;font-weight:600;font-variant-numeric:tabular-nums}
+  .reset-probability small{display:block;font-size:10px;color:var(--text2);margin-top:2px}
+  .reset-estimate-note{font-size:10px;line-height:1.5;color:var(--text2);border-top:1px solid var(--line);padding-top:9px;margin-top:10px}
+  .reset-timeline{margin:0;padding:0;list-style:none;background:var(--group);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  .reset-timeline li{position:relative;padding:11px 13px 11px 28px;font-size:11px}
+  .reset-timeline li + li{border-top:1px solid var(--line)}
+  .reset-timeline li::before{content:"";position:absolute;left:13px;top:15px;width:5px;height:5px;border-radius:50%;background:var(--reset-green)}
+  .reset-timeline time{display:block;color:var(--text2);font-size:10px;margin-top:3px}
+  .reset-timeline p{margin:0;line-height:1.5;overflow-wrap:anywhere}
+  .reset-actions{display:flex;justify-content:space-between;align-items:center;gap:8px;margin:10px 1px 2px}
+  .reset-actions .btn{font-size:11px;padding:5px 10px}
+  #reset-updated{font-size:10px;color:var(--text2)}
+  #reset-error{color:var(--danger);font-size:11px;line-height:1.5;margin-top:8px;overflow-wrap:anywhere}
+  .reset-notification-copy{font-size:11px;color:var(--text2);margin:4px 0 0;line-height:1.5;max-width:290px}
+  #pane-resets .item{padding:11px 12px}
+  @media (max-width:560px){#side{width:165px}.reset-cards{grid-template-columns:1fr}.reset-hero{padding:14px}.reset-hero h2{font-size:18px}}
 </style>
 </head>
 <body>
@@ -132,6 +187,7 @@
   <nav id="side" role="tablist" aria-orientation="vertical" aria-label="Settings sections">
     <div class="band" data-tauri-drag-region></div>
     <button class="row" id="tab-accounts" role="tab" aria-controls="pane-accounts" aria-selected="false" tabindex="-1"><span class="badge b-blue"><svg viewBox="0 0 12 12"><circle cx="6" cy="4" r="2.4"/><path d="M1.5 11.2c.4-2.5 2.3-3.9 4.5-3.9s4.1 1.4 4.5 3.9z"/></svg></span><span>Accounts</span></button>
+    <button class="row" id="tab-resets" role="tab" aria-controls="pane-resets" aria-selected="false" tabindex="-1"><span class="badge b-mint"><svg viewBox="0 0 12 12"><path d="M9.8 4A4.1 4.1 0 1 0 10 7" fill="none" stroke="#fff" stroke-width="1.4" stroke-linecap="round"/><path d="M7.3 4.3h3V1.5" fill="none" stroke="#fff" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span>Reset Tracker</span></button>
     <button class="row" id="tab-appearance" role="tab" aria-controls="pane-appearance" aria-selected="false" tabindex="-1"><span class="badge b-indigo"><svg viewBox="0 0 12 12"><path d="M10 .9a.8.8 0 0 1 1.1 1.1L6.4 6.7 5.3 5.6zM4.6 6.3l1.1 1.1c.2 1.9-1.9 3.6-4.7 3.1.9-.4 1.2-1 1.3-1.8.1-1.3 1.1-2.3 2.3-2.4z"/></svg></span><span>Appearance</span></button>
     <button class="row" id="tab-general" role="tab" aria-controls="pane-general" aria-selected="false" tabindex="-1"><span class="badge b-gray"><svg viewBox="0 0 24 24"><path fill-rule="evenodd" stroke="#fff" stroke-width="1.6" stroke-linejoin="round" d="M10.03 4.66L10.14 1.97 A10.20 10.20 0 0 1 13.86 1.97 L13.97 4.66A7.60 7.60 0 0 1 15.80 5.42L17.78 3.59 A10.20 10.20 0 0 1 20.41 6.22 L18.58 8.20A7.60 7.60 0 0 1 19.34 10.03L22.03 10.14 A10.20 10.20 0 0 1 22.03 13.86 L19.34 13.97A7.60 7.60 0 0 1 18.58 15.80L20.41 17.78 A10.20 10.20 0 0 1 17.78 20.41 L15.80 18.58A7.60 7.60 0 0 1 13.97 19.34L13.86 22.03 A10.20 10.20 0 0 1 10.14 22.03 L10.03 19.34A7.60 7.60 0 0 1 8.20 18.58L6.22 20.41 A10.20 10.20 0 0 1 3.59 17.78 L5.42 15.80A7.60 7.60 0 0 1 4.66 13.97L1.97 13.86 A10.20 10.20 0 0 1 1.97 10.14 L4.66 10.03A7.60 7.60 0 0 1 5.42 8.20L3.59 6.22 A10.20 10.20 0 0 1 6.22 3.59 L8.20 5.42A7.60 7.60 0 0 1 10.03 4.66 ZM7.90 12a4.10 4.10 0 1 0 8.20 0a4.10 4.10 0 1 0 -8.20 0Z"/></svg></span><span>General</span></button>
     <div class="grow" data-tauri-drag-region></div>
@@ -153,6 +209,39 @@
           <div class="sec">Not connected</div>
           <div class="group" id="acc-off" data-dynamic></div>
         </div>
+      </section>
+
+      <section class="pane" id="pane-resets" role="tabpanel" aria-labelledby="tab-resets" hidden>
+        <div class="reset-hero">
+          <div class="reset-eyebrow"><span>Codex · ChatGPT Work</span><span id="reset-feed" class="reset-feed" data-dynamic data-status="loading">Connecting</span></div>
+          <div class="reset-hero-main">
+            <div class="reset-orbit" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M20 7a8.2 8.2 0 1 0 .4 9M15 7h6V1"/></svg></div>
+            <div><h2 id="reset-latest-title" data-dynamic>Watching for resets</h2><div id="reset-latest-time" class="reset-hero-time" data-dynamic>Latest confirmed global reset</div></div>
+          </div>
+          <p class="reset-summary" id="reset-summary" data-dynamic>Public reset announcements, alongside your personal Codex windows.</p>
+          <div class="reset-foot"><span>Public announcements</span><button class="link" id="btn-reset-source" title="https://codex-reset.com/">Source: codex-reset.com ↗</button></div>
+        </div>
+        <div class="reset-chapter"><h2>Your Codex windows</h2><span class="reset-tag">Personal</span></div>
+        <div class="reset-cards" id="reset-personal-windows" data-dynamic></div>
+        <p class="reset-note" id="reset-personal-note" data-dynamic>Reading your account usage…</p>
+        <div class="reset-chapter"><h2>Global reset outlook</h2><span class="reset-tag">Historical estimate</span></div>
+        <div class="reset-forecast">
+          <div class="reset-probabilities">
+            <div class="reset-probability"><strong id="reset-prob24" data-dynamic>—</strong><small>Within 24 hours</small></div>
+            <div class="reset-probability"><strong id="reset-prob48" data-dynamic>—</strong><small>Within 48 hours</small></div>
+          </div>
+          <div id="reset-forecast-note" class="reset-estimate-note" data-dynamic>Based on past reset intervals. This is an estimate, not a scheduled reset.</div>
+        </div>
+        <div class="reset-chapter"><h2>Verified reset history</h2><span class="reset-tag">Global</span></div>
+        <ol id="reset-history" class="reset-timeline" data-dynamic aria-label="Verified global reset history"></ol>
+        <div class="reset-actions"><span id="reset-updated" data-dynamic>Waiting for first check</span><button class="btn" id="btn-reset-refresh" data-dynamic>Refresh</button></div>
+        <div id="reset-error" data-dynamic role="status" hidden></div>
+        <div class="reset-chapter"><h2>Stay in the loop</h2></div>
+        <div class="group">
+          <div class="item"><div><span>Global reset notifications</span><p class="reset-notification-copy">Get a card when a new verified announcement appears, even with the notch hidden.</p></div><button class="switch" id="sw-global-reset" role="switch" aria-checked="false" aria-label="Global reset notifications" disabled></button></div>
+          <div class="item"><span class="hint">See how the announcement card looks.</span><button class="btn" id="btn-global-reset-preview">Test notification</button></div>
+        </div>
+        <p class="reset-note">Global announcements cover Codex and ChatGPT Work. Check your account to confirm your own allowance; ordinary ChatGPT message limits are separate.</p>
       </section>
 
       <section class="pane" id="pane-appearance" role="tabpanel" aria-labelledby="tab-appearance" hidden>
@@ -239,7 +328,7 @@
 
 <script>
 /* ---------------------------------------------------------------------------
-   Codenotch settings: the Mac's three panes — Accounts, Appearance, General.
+   Codenotch settings: Accounts, Reset Tracker, Appearance, General.
 
    Every value on screen comes from a Rust command and is written back by one.
    Every call is wrapped so a failure paints the strip under the title instead
@@ -1111,8 +1200,8 @@ function loadLook(){
 try { window.__TAURI__.event.listen('theme_resolved', e => { if(e.payload) applyTheme(e.payload); }); } catch(e) { /* asked for again below */ }
 
 /* ---- the sidebar -------------------------------------------------------- */
-const TABS = ['accounts', 'appearance', 'general'];
-const TITLES = { accounts:'Accounts', appearance:'Appearance', general:'General' };
+const TABS = ['accounts', 'resets', 'appearance', 'general'];
+const TITLES = { accounts:'Accounts', resets:'Reset Tracker', appearance:'Appearance', general:'General' };
 const TAB_KEY = 'codenotch.settings.pane';
 let curTab = TABS[0];
 function showTab(id, moveFocus){
@@ -1691,6 +1780,167 @@ document.getElementById('author').addEventListener('click', () => {
   catch(e) { /* the built-in number stays */ }
 })();
 
+/* ---- reset tracker --------------------------------------------------------
+   Public announcements and personal account windows are separate data sources. A countdown reaching
+   zero never confirms a reset; only a new account reading can do that. External strings are placed
+   with textContent, and the source button opens a fixed, Rust-validated destination. */
+let globalResetState = null, codexResetState = null, globalResetBusy = false, globalResetRevision = 0, codexResetRevision = 0;
+const resetNode = id => document.getElementById(id);
+const validResetTime = ms => typeof ms === 'number' && Number.isFinite(ms) && ms > 0 && ms <= 8640000000000000;
+function resetDate(ms){
+  if(!validResetTime(ms)) return '';
+  return new Date(ms).toLocaleString(document.documentElement.lang || 'en', {
+    day:'numeric', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit'
+  });
+}
+function resetAgo(ms, now){
+  if(!validResetTime(ms)) return '';
+  const mins = Math.max(0, Math.floor((now - ms) / 60000));
+  if(mins < 1) return ui('just now', 'just now');
+  if(mins < 60) return mins + ' ' + ui('min ago', 'min ago');
+  const hours = Math.floor(mins / 60);
+  if(hours < 24) return hours + ' ' + ui('h ago', 'h ago');
+  return Math.floor(hours / 24) + ' ' + ui('days ago', 'days ago');
+}
+function resetCountdown(ms, now){
+  if(!validResetTime(ms)) return ui('Time unknown', 'Time unknown');
+  if(ms <= now) return ui('Awaiting usage update', 'Awaiting usage update');
+  const minutes = Math.ceil((ms - now) / 60000), hours = Math.floor(minutes / 60), days = Math.floor(hours / 24);
+  if(days) return days + 'd ' + (hours % 24) + 'h';
+  if(hours) return hours + 'h ' + (minutes % 60) + 'm';
+  return minutes + 'm';
+}
+function resetProbability(value){
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 100
+    ? Math.round(value) + '%' : '—';
+}
+function appendResetText(parent, tag, className, text){
+  const node = document.createElement(tag);
+  if(className) node.className = className;
+  node.textContent = text;
+  parent.appendChild(node);
+  return node;
+}
+function renderPersonalResets(now){
+  const holder = resetNode('reset-personal-windows');
+  holder.replaceChildren();
+  const state = codexResetState || {};
+  const windows = Array.isArray(state.windows) ? state.windows.filter(w => w && typeof w.label === 'string').slice(0, 4) : [];
+  if(!windows.length){
+    const text = !codexResetState ? 'Reading your Codex windows…' : state.status === 'needsAuth' || state.status === 'absent'
+      ? 'Sign in to Codex to see your personal reset times.' : 'No personal reset windows available yet.';
+    appendResetText(holder, 'div', 'reset-empty', ui(text, text));
+  }
+  for(const w of windows){
+    const card = document.createElement('div'); card.className = 'reset-personal';
+    const name = document.createElement('div'); name.className = 'reset-personal-name';
+    appendResetText(name, 'span', '', w.label);
+    const used = typeof w.used === 'number' && Number.isFinite(w.used) ? Math.max(0, Math.min(1, w.used)) : null;
+    appendResetText(name, 'span', 'reset-personal-percent', used === null ? '—' : Math.round(used * 100) + '% ' + ui('used', 'used'));
+    card.appendChild(name);
+    const countdown = appendResetText(card, 'div', 'reset-countdown', resetCountdown(w.resets_at, now));
+    if(!validResetTime(w.resets_at) || w.resets_at <= now) countdown.classList.add('waiting');
+    const meter = document.createElement('div'); meter.className = 'reset-meter'; meter.setAttribute('aria-hidden', 'true');
+    const fill = document.createElement('span'); fill.style.width = used === null ? '0%' : (used * 100) + '%';
+    meter.appendChild(fill); card.appendChild(meter);
+    appendResetText(card, 'div', 'reset-personal-time', resetDate(w.resets_at) || ui('Reset time not reported', 'Reset time not reported'));
+    holder.appendChild(card);
+  }
+  const reading = state.fetched_at ? ui('Account updated', 'Account updated') + ' ' + resetAgo(state.fetched_at, now) + '. ' : '';
+  const fresh = state.status === 'ok' && validResetTime(state.fetched_at) && state.fetched_at <= now + 60000 && now - state.fetched_at <= 300000;
+  const freshness = fresh ? '' : windows.length ? ui('Last known reading. ', 'Last known reading. ') : '';
+  resetNode('reset-personal-note').textContent = freshness + reading
+    + ui('Personal windows renew on your own schedule.', 'Personal windows renew on your own schedule.');
+}
+function renderResetTracker(){
+  const now = Date.now(), state = globalResetState || {}, latest = state.last_reset && validResetTime(state.last_reset.announced_at) ? state.last_reset : null, forecast = state.forecast;
+  const feed = resetNode('reset-feed');
+  const status = globalResetBusy || state.refreshing ? 'loading' : state.status || 'loading';
+  const statusText = { ok:'Live feed', stale:'Saved feed', offline:'Feed offline', loading:'Checking…' }[status] || 'Feed unavailable';
+  feed.textContent = ui(statusText, statusText); feed.dataset.status = status;
+  resetNode('reset-latest-title').textContent = latest ? ui('Latest global reset', 'Latest global reset') : ui('Watching for resets', 'Watching for resets');
+  resetNode('reset-latest-time').textContent = latest ? resetDate(latest.announced_at) + ' · ' + resetAgo(latest.announced_at, now)
+    : ui('No confirmed announcement loaded yet', 'No confirmed announcement loaded yet');
+  resetNode('reset-summary').textContent = latest && typeof latest.summary === 'string' && latest.summary
+    ? latest.summary.slice(0, 320)
+    : ui('Public reset announcements, alongside your personal Codex windows.', 'Public reset announcements, alongside your personal Codex windows.');
+  resetNode('reset-prob24').textContent = resetProbability(forecast && forecast.probability_24h);
+  resetNode('reset-prob48').textContent = resetProbability(forecast && forecast.probability_48h);
+  const forecastNote = ui('Based on past reset intervals. This is an estimate, not a scheduled reset.', 'Based on past reset intervals. This is an estimate, not a scheduled reset.');
+  resetNode('reset-forecast-note').textContent = forecastNote
+    + (forecast && forecast.confidence ? ' ' + ui('Confidence:', 'Confidence:') + ' ' + String(forecast.confidence) + '.' : '')
+    + (forecast && forecast.confidence_note ? ' ' + String(forecast.confidence_note).slice(0, 240) : '');
+  const history = resetNode('reset-history'); history.replaceChildren();
+  const events = Array.isArray(state.history) ? state.history.filter(e => e && validResetTime(e.announced_at)).slice(0, 4) : [];
+  for(const event of events){
+    const item = document.createElement('li');
+    appendResetText(item, 'p', '', event.summary ? String(event.summary).slice(0, 400) : ui('Global reset confirmed', 'Global reset confirmed'));
+    const time = appendResetText(item, 'time', '', resetDate(event.announced_at));
+    time.dateTime = new Date(event.announced_at).toISOString();
+    history.appendChild(item);
+  }
+  if(!events.length) appendResetText(history, 'li', '', ui('History will appear after the first successful check.', 'History will appear after the first successful check.'));
+  resetNode('reset-updated').textContent = state.fetched_at
+    ? ui('Checked', 'Checked') + ' ' + resetAgo(state.fetched_at, now)
+    : ui('Waiting for first check', 'Waiting for first check');
+  const refresh = resetNode('btn-reset-refresh');
+  refresh.disabled = status === 'loading';
+  refresh.textContent = status === 'loading' ? ui('Checking…', 'Checking…') : ui('Refresh', 'Refresh');
+  refresh.title = state.next_check_at > now ? ui('Next automatic check:', 'Next automatic check:') + ' ' + resetDate(state.next_check_at) : '';
+  const error = resetNode('reset-error'); error.hidden = !state.error;
+  error.textContent = state.error ? ui('Could not update the feed. ', 'Could not update the feed. ') + String(state.error).slice(0, 240) : '';
+  drawSwitch(resetNode('sw-global-reset'), { value:state.notifications === true, busy:globalResetBusy || typeof state.notifications !== 'boolean' });
+  renderPersonalResets(now);
+}
+async function refreshResetTracker(){
+  const revision = globalResetRevision;
+  try {
+    const state = await invoke('get_global_reset_state');
+    if(revision === globalResetRevision && state && typeof state === 'object'){ globalResetState = state; renderResetTracker(); }
+  } catch(e) {
+    if(!globalResetState){ globalResetState = { status:'offline', error:errText(e) }; renderResetTracker(); }
+  }
+}
+async function refreshCodexResets(){
+  const revision = codexResetRevision;
+  try { const state = await invoke('get_codex'); if(revision === codexResetRevision && state){ codexResetState = state; renderResetTracker(); } }
+  catch(e) { /* Public reset feed still works without a personal account reading. */ }
+}
+resetNode('btn-reset-refresh').addEventListener('click', async () => {
+  if(globalResetBusy) return;
+  globalResetBusy = true; renderResetTracker();
+  const revision = globalResetRevision;
+  try { const state = await invoke('refresh_global_resets'); if(revision === globalResetRevision && state && typeof state === 'object') globalResetState = state; }
+  catch(e) { strip('Reset feed refresh failed: ' + errText(e)); }
+  finally { globalResetBusy = false; renderResetTracker(); }
+});
+resetNode('sw-global-reset').addEventListener('click', async () => {
+  if(globalResetBusy || !globalResetState || typeof globalResetState.notifications !== 'boolean') return;
+  const want = !globalResetState.notifications;
+  globalResetBusy = true; renderResetTracker();
+  try { await invoke('set_global_reset_notifications', { on:want }); await refreshResetTracker(); toast(); }
+  catch(e) { strip('Global reset notifications could not be changed: ' + errText(e)); }
+  finally { globalResetBusy = false; renderResetTracker(); }
+});
+resetNode('btn-reset-source').addEventListener('click', () => {
+  invoke('open_global_reset_source').catch(e => strip('Source could not be opened: ' + errText(e)));
+});
+resetNode('btn-global-reset-preview').addEventListener('click', async e => {
+  const button = e.currentTarget; button.disabled = true;
+  try { await invoke('preview_global_reset_alert'); }
+  catch(err) { strip('Test notification failed: ' + errText(err)); }
+  finally { button.disabled = false; }
+});
+try {
+  Promise.resolve(window.__TAURI__.event.listen('global_reset_state', e => {
+    if(e.payload){ globalResetRevision++; globalResetState = e.payload; renderResetTracker(); }
+  })).catch(() => {});
+  Promise.resolve(window.__TAURI__.event.listen('codex', e => {
+    if(e.payload){ codexResetRevision++; codexResetState = e.payload; renderResetTracker(); }
+  })).catch(() => {});
+} catch(e) { /* State is also asked for when the window opens or gets focus. */ }
+setInterval(() => { if(curTab === 'resets') renderResetTracker(); }, 30000);
+
 /* ---- updates --------------------------------------------------------------
    Never a dialogue and never a badge: an update the user has not asked about is
    a line of text next to the version, and a check that failed says so where it
@@ -1742,6 +1992,7 @@ function renderAll(){
   drawSwitch(document.getElementById('sw-reset-sound'), resetSound);
   drawSwitch(document.getElementById('sw-adaptive'), adaptivePill);
   drawSwitch(document.getElementById('sw-weekly-dashed'), weeklyDashed);
+  renderResetTracker();
   if(updState) renderUpdate(updState);
   document.getElementById('title').textContent = ui(TITLES[curTab], TITLES[curTab]);
 }
@@ -1750,6 +2001,8 @@ function boot(){
   setUiLanguage('auto');
   const first = [
     loadLook(),
+    refreshResetTracker(),
+    refreshCodexResets(),
     refreshOptions(),
     call('get_notch_slots', undefined, []).then(v => {
       notchSlots = Array.isArray(v) ? v.filter(x => x && typeof x.provider === 'string').map(x => ({ provider:x.provider })) : [];
@@ -1794,6 +2047,8 @@ function boot(){
 window.addEventListener('focus', () => {
   loadLook();
   refreshOptions();
+  refreshResetTracker();
+  refreshCodexResets();
   // A screen can be plugged in, and the notch carried to another edge, while this window sits behind
   call('get_notch_edge', undefined, null).then(v => { if(typeof v === 'string') notchEdge = v; renderEdge(); });
   refreshScreens();

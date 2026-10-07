@@ -85,6 +85,32 @@ default), a switch for the notification sound, and a **Preview card** button.
 When more than one window renews together, their cards appear one after the
 other. The Windows app must be running to observe and show a reset.
 
+### Codex / ChatGPT Work Reset Tracker (this fork)
+
+Open **Settings → Reset Tracker** for the latest confirmed global reset, recent
+verified reset history, historical 24/48-hour forecast, and the personal quota
+windows returned by your installed Codex client. Public reset data is provided by
+[codex-reset.com](https://codex-reset.com/), independently of your OpenAI account.
+Forecasts and announced future resets are not completed resets, and banked grants
+are not treated as completed resets. Ordinary ChatGPT chat limits are separate;
+this tracker does not claim to verify them.
+
+Enable global reset cards in the tracker and choose **Test notification** to see
+one immediately. The first successful check establishes a quiet baseline. Later
+confirmed global resets notify once; the cursor is saved across restarts. Personal
+quota cards still depend on a fresh local reading. The app must stay running
+(including in the tray) to poll and display notifications.
+
+For this fork, download the Windows installer or portable ZIP from the latest
+successful [Windows Package run](https://github.com/ThePunisherai/codenotch/actions).
+The upstream release download below does not contain this fork's reset tracker.
+The portable ZIP must be extracted before launching `codenotch.exe`; WebView2 is
+required. The installer can provision WebView2 when missing. Update checks for
+this fork use ThePunisherai/codenotch releases. To build locally on Windows x64
+with Rust MSVC, Node.js and Visual Studio C++ Build Tools installed, run
+`powershell -ExecutionPolicy Bypass -File .\windows\scripts\build-windows.ps1`.
+See [the reset tracker guide](../WINDOWS_RESET_TRACKER.md) for all controls.
+
 ### Claude sign-in
 
 When Claude is signed out, its card offers **Sign in**, which opens the standalone
