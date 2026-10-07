@@ -2,17 +2,37 @@
 
 Open **Settings → Reset Tracker** from the notch or the system tray.
 
-The tracker shows three separate sources of information:
+The tracker keeps public announcements separate from account readings:
 
 - **Reset announcements:** the latest confirmed public Codex/ChatGPT Work reset reported by [codex-reset.com](https://codex-reset.com/), including its announcement time and history. Ordinary ChatGPT message limits are separate.
 - **Reset forecast:** the source's historical estimate. A forecast does not confirm a reset or trigger a reset notification.
-- **Your Codex windows:** usage and reset countdowns read from the existing local Codex sign-in. An elapsed countdown waits for a fresh account reading before declaring a quota renewal.
+- **Banked resets:** public announced, arriving, available or unknown status and its history. Availability for your account, remaining grants and expiry are unknown unless the provider reports them. Banked updates never advance the confirmed global reset clock.
+- **Live feed and service status:** recent public updates and source-reported service health.
+- **Your Codex windows:** usage and reset countdowns read from the selected Codex account. An elapsed countdown waits for a fresh account reading before declaring a quota renewal.
 
 The tracker keeps the last successful public reading when offline and labels it accordingly. Your credentials are not sent to the public reset tracker.
+
+Public endpoints are checked concurrently every 60 seconds, measured from the start of each check. Opening the tracker, returning to it or choosing Refresh requests a check as soon as the source permits. The interface updates ages and countdowns every second. The source itself caches responses for 60 seconds and permits at most one request per minute per endpoint; it has no documented push subscription. Consequently this is automatic polling, not a guarantee of zero publication delay. HTTP 429 waits are respected.
+
+## Multiple accounts
+
+Open **Settings → Accounts**. Add a named profile, choose **Sign in** or **Connect**, and select **Use** to display its quota. **Detect existing** imports supported existing local CLI/editor sessions into separate profiles. Account selection immediately clears the previous account's displayed quota and requests a fresh reading. Usage caches, rate-limit waits and personal-reset baselines belong to each profile; switching accounts does not count as a reset.
+
+| Provider | Connect method |
+|---|---|
+| Codex / Claude | Official native CLI login in an isolated profile directory; supported existing CLI credential files can also be imported. |
+| Antigravity / Cursor | Import a supported existing local session. Antigravity may also use the installed official CLI. Browser login alone does not expose a session to Codenotch. |
+| GitHub Copilot | Official GitHub CLI device login in an isolated profile, or connect a supported token. |
+| GLM / OpenCode | Connect the appropriate provider key; supported OpenCode sessions can be detected. |
+| Grok | Official Grok CLI browser login in an isolated profile, or import its existing session; only supported issuer credentials are used. |
+
+The account registry contains profile metadata, not tokens. Imported desktop credentials and entered keys are protected with current-user Windows DPAPI; official CLIs manage their own profile auth files. Secrets never appear in account-list responses. A saved credential is marked **Connected** only after a successful fresh usage reading. Removing a profile removes its app-owned credentials without signing out the original CLI/editor installation.
 
 ## Notifications
 
 Enable **Global reset notifications** on the Reset Tracker tab to receive the new announcement card. **Test notification** lets you see it immediately. The card's source button opens `https://codex-reset.com/`.
+
+Banked update notifications have a separate switch and preview. They report a public update and ask you to check availability in your account. They never claim that a banked grant has been credited personally.
 
 Personal usage-window notifications remain under **General → Notifications → Reset notifications**. The notification sound is shared. Notifications can appear while the notch is hidden, provided Codenotch is still running.
 

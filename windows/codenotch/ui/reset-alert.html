@@ -60,6 +60,10 @@
   body[data-scope="global"] .status{margin-top:10px;font-size:11px}
   body[data-scope="global"] #next{font-size:9px;margin-top:8px;margin-left:0}
   body[data-scope="global"] #source{margin-top:8px}
+  body[data-kind="banked_reset"]{--ample:#bd9aff}
+  :root[data-theme="light"] body[data-kind="banked_reset"]{--ample:#7041b3}
+  body[data-kind="banked_reset"] #card{background:linear-gradient(125deg,rgba(153,105,235,.13),transparent 80%),var(--card)}
+  body[data-kind="banked_reset"] #glyph{background:rgba(153,105,235,.13)}
   @media (prefers-reduced-motion: no-preference){#card{animation:appear .18s ease-out both}@keyframes appear{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}}
 </style>
 </head>
@@ -87,6 +91,7 @@ document.body.dataset.edge = ['left','right','top','bottom'].includes(data.edge)
 document.body.dataset.attached = data.attached ? 'true' : 'false';
 const globalAnnouncement = data.scope === 'global' || data.kind === 'global_reset';
 document.body.dataset.scope = globalAnnouncement ? 'global' : 'personal';
+document.body.dataset.kind = data.kind === 'banked_reset' ? 'banked_reset' : globalAnnouncement ? 'global_reset' : 'quota_reset';
 document.getElementById('title').textContent = data.title;
 document.getElementById('title').setAttribute('title', data.title || '');
 document.getElementById('subtitle').textContent = data.subtitle;

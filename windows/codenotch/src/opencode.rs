@@ -42,12 +42,27 @@ const BACKOFF_BASE_SECS: u64 = 60;
 const BACKOFF_CAP_SECS: u64 = 900;
 
 static REFRESH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static BACKOFF_UNTIL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-static CONSECUTIVE_429: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static BACKOFFS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, (u64, u32)>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+fn backoff_for(selection: &str) -> (u64, u32) {
+    BACKOFFS
+        .lock()
+        .unwrap()
+        .get(selection)
+        .copied()
+        .unwrap_or_default()
+}
+
+fn remember_backoff(selection: &str, until: u64, failures: u32) {
+    BACKOFFS
+        .lock()
+        .unwrap()
+        .insert(selection.to_string(), (until, failures));
+}
 
 pub fn request_refresh() {
-    BACKOFF_UNTIL.store(0, std::sync::atomic::Ordering::Relaxed);
-    CONSECUTIVE_429.store(0, std::sync::atomic::Ordering::Relaxed);
     REFRESH.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
@@ -59,7 +74,7 @@ fn now_ms() -> u64 {
 }
 
 fn store_path() -> PathBuf {
-    crate::config::config_path().with_file_name("opencode-usage.json")
+    crate::accounts::cache_path("opencode", "opencode-usage.json")
 }
 
 pub fn load_persisted() -> UsageSnapshot {
@@ -70,16 +85,12 @@ pub fn load_persisted() -> UsageSnapshot {
             if !s.windows.is_empty() {
                 s.status = "stale".into();
             }
-            BACKOFF_UNTIL.store(s.backoff_until, std::sync::atomic::Ordering::Relaxed);
+            let selection = crate::accounts::selection_key("opencode");
+            let (_, failures) = backoff_for(&selection);
+            remember_backoff(&selection, s.backoff_until, failures);
             s
         })
         .unwrap_or_default()
-}
-
-fn persist(s: &UsageSnapshot) {
-    if let Ok(t) = serde_json::to_string_pretty(s) {
-        let _ = std::fs::write(store_path(), t);
-    }
 }
 
 // ---------------- Credentials (borrowed, never written) ----------------
@@ -100,6 +111,19 @@ struct Credential {
 
 /// OpenCode's data dirs: $XDG_DATA_HOME/opencode when set, else ~/.local/share/opencode
 fn data_dirs() -> Vec<PathBuf> {
+    if let Some(profile) = crate::accounts::active("opencode") {
+        if let Some(p) = profile.credential_path {
+            return p
+                .parent()
+                .map(|p| vec![p.to_path_buf()])
+                .unwrap_or_default();
+        }
+        return vec![profile.root.join("data").join("opencode"), profile.root];
+    }
+    external_data_dirs()
+}
+
+fn external_data_dirs() -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Some(x) = std::env::var_os("XDG_DATA_HOME").filter(|x| !x.is_empty()) {
         out.push(PathBuf::from(x).join("opencode"));
@@ -123,28 +147,52 @@ fn non_empty(v: Option<&serde_json::Value>) -> Option<String> {
 /// {"type":"oauth","access","expires","metadata":{"orgID"}}. A bare string is the key itself.
 fn credential_from(entry: &serde_json::Value, source: &'static str) -> Option<Credential> {
     if let Some(token) = non_empty(Some(entry)) {
-        return Some(Credential { token, oauth: false, console: None, org: None, expires: None, source });
+        return Some(Credential {
+            token,
+            oauth: false,
+            console: None,
+            org: None,
+            expires: None,
+            source,
+        });
     }
     let obj = entry.as_object()?;
     if obj.get("type").and_then(|t| t.as_str()) == Some("oauth") {
         let token = non_empty(obj.get("access"))?;
         let meta = obj.get("metadata");
         let org = non_empty(meta.and_then(|m| m.get("orgID")));
-        let console = non_empty(meta.and_then(|m| m.get("server")));
+        let console = non_empty(meta.and_then(|m| m.get("server"))).filter(|s| trusted_console(s));
         // OpenCode writes `expires` as a number in auth.json and as a string in opencode.db
-        let expires = obj
-            .get("expires")
-            .and_then(|e| e.as_u64().or_else(|| e.as_str().and_then(|s| s.parse().ok())));
-        return Some(Credential { token, oauth: true, console, org, expires, source });
+        let expires = obj.get("expires").and_then(|e| {
+            e.as_u64()
+                .or_else(|| e.as_str().and_then(|s| s.parse().ok()))
+        });
+        return Some(Credential {
+            token,
+            oauth: true,
+            console,
+            org,
+            expires,
+            source,
+        });
     }
     let token = ["key", "apiKey", "api_key", "token", "accessToken"]
         .iter()
         .find_map(|f| non_empty(obj.get(*f)))?;
-    Some(Credential { token, oauth: false, console: None, org: None, expires: None, source })
+    Some(Credential {
+        token,
+        oauth: false,
+        console: None,
+        org: None,
+        expires: None,
+        source,
+    })
 }
 
 fn read_auth_json(dir: &std::path::Path) -> Option<serde_json::Value> {
-    std::fs::read_to_string(dir.join("auth.json")).ok().and_then(|t| serde_json::from_str(&t).ok())
+    std::fs::read_to_string(dir.join("auth.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
 }
 
 /// mode=ro first, immutable=1 as the fallback (see the module doc)
@@ -154,7 +202,9 @@ fn open_ro(path: &std::path::Path) -> Option<rusqlite::Connection> {
         return None;
     }
     let works = |c: &rusqlite::Connection| {
-        c.prepare("SELECT 1 FROM credential LIMIT 1").and_then(|mut s| s.query([]).map(|_| ())).is_ok()
+        c.prepare("SELECT 1 FROM credential LIMIT 1")
+            .and_then(|mut s| s.query([]).map(|_| ()))
+            .is_ok()
     };
     if let Ok(c) = rusqlite::Connection::open_with_flags(
         path,
@@ -165,11 +215,20 @@ fn open_ro(path: &std::path::Path) -> Option<rusqlite::Connection> {
         }
     }
     let mut uri = String::from("file:///");
-    uri.push_str(&path.to_string_lossy().replace('\\', "/").trim_start_matches('/').replace('#', "%23").replace('?', "%3F"));
+    uri.push_str(
+        &path
+            .to_string_lossy()
+            .replace('\\', "/")
+            .trim_start_matches('/')
+            .replace('#', "%23")
+            .replace('?', "%3F"),
+    );
     uri.push_str("?immutable=1");
     rusqlite::Connection::open_with_flags(
         &uri,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_URI
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .ok()
     .filter(works)
@@ -190,39 +249,93 @@ fn credential_from_db(conn: &rusqlite::Connection) -> Option<Credential> {
         })
         .ok()?;
     ["opencode-go", "opencode"].iter().find_map(|id| {
-        rows.iter()
-            .filter(|(i, _)| i == id)
-            .find_map(|(_, v)| serde_json::from_str::<serde_json::Value>(v).ok().and_then(|v| credential_from(&v, "OpenCode")))
+        rows.iter().filter(|(i, _)| i == id).find_map(|(_, v)| {
+            serde_json::from_str::<serde_json::Value>(v)
+                .ok()
+                .and_then(|v| credential_from(&v, "OpenCode"))
+        })
     })
 }
 
 fn load_credential() -> Option<Credential> {
-    let dirs = data_dirs();
+    if crate::accounts::active("opencode").is_some() {
+        if let Some(secret) = crate::accounts::secret("opencode") {
+            let v: serde_json::Value = serde_json::from_str(&secret).ok()?;
+            return credential_from(&v, "saved OpenCode account")
+                .or_else(|| {
+                    v.get("opencode-go")
+                        .and_then(|v| credential_from(v, "saved OpenCode account"))
+                })
+                .or_else(|| {
+                    v.get("opencode")
+                        .and_then(|v| credential_from(v, "saved OpenCode account"))
+                });
+        }
+    }
+    credential_in_dirs(&data_dirs())
+}
+
+fn credential_in_dirs(dirs: &[PathBuf]) -> Option<Credential> {
     // 1. the Go plan's own key, as OpenCode wrote it before 1.18 (and the Mac reads it)
-    for d in &dirs {
-        if let Some(c) = read_auth_json(d).and_then(|r| r.get("opencode-go").and_then(|e| credential_from(e, "OpenCode"))) {
+    for d in dirs {
+        if let Some(c) = read_auth_json(d).and_then(|r| {
+            r.get("opencode-go")
+                .and_then(|e| credential_from(e, "OpenCode"))
+        }) {
             return Some(c);
         }
     }
     // 2. OpenCode 1.18+: the sign-in lives in opencode.db
-    for d in &dirs {
-        if let Some(c) = open_ro(&d.join("opencode.db")).and_then(|conn| credential_from_db(&conn)) {
+    for d in dirs {
+        if let Some(c) = open_ro(&d.join("opencode.db")).and_then(|conn| credential_from_db(&conn))
+        {
             return Some(c);
         }
     }
     // 3. the same OAuth sign-in mirrored into auth.json
-    for d in &dirs {
-        let Some(root) = read_auth_json(d) else { continue };
-        if let Some(c) = root.get("opencode").filter(|e| e.get("type").and_then(|t| t.as_str()) == Some("oauth")).and_then(|e| credential_from(e, "OpenCode")) {
+    for d in dirs {
+        let Some(root) = read_auth_json(d) else {
+            continue;
+        };
+        if let Some(c) = root
+            .get("opencode")
+            .filter(|e| e.get("type").and_then(|t| t.as_str()) == Some("oauth"))
+            .and_then(|e| credential_from(e, "OpenCode"))
+        {
             return Some(c);
         }
     }
     None
 }
 
+pub(crate) fn capture_current_credential() -> Option<String> {
+    let c = credential_in_dirs(&external_data_dirs())?;
+    Some(serialize_credential(c))
+}
+
+/// Reads only this official CLI's isolated profile, including OpenCode 1.18's
+/// database credential store. No external account is consulted.
+pub(crate) fn capture_credential_in(root: &std::path::Path) -> Option<String> {
+    let c = credential_in_dirs(&[root.join("data").join("opencode"), root.to_path_buf()])?;
+    Some(serialize_credential(c))
+}
+
+fn serialize_credential(c: Credential) -> String {
+    if c.oauth {
+        serde_json::json!({"type": "oauth", "access": c.token, "expires": c.expires,
+            "metadata": {"orgID": c.org, "server": c.console}})
+        .to_string()
+    } else {
+        serde_json::json!({"type": "api", "key": c.token}).to_string()
+    }
+}
+
 /// Is OpenCode on this machine at all? If not, no cell is shown.
 pub fn present() -> bool {
-    data_dirs().iter().any(|d| d.join("auth.json").is_file() || d.join("opencode.db").is_file())
+    crate::accounts::active("opencode").is_some()
+        || data_dirs()
+            .iter()
+            .any(|d| d.join("auth.json").is_file() || d.join("opencode.db").is_file())
 }
 
 // ---------------- The usage endpoint ----------------
@@ -238,7 +351,10 @@ fn get(url: &str, cred: &Credential) -> ureq::Request {
     let mut req = ureq::get(url)
         .set("Authorization", &format!("Bearer {}", cred.token))
         .set("Accept", "application/json")
-        .set("User-Agent", concat!("codenotch/", env!("CARGO_PKG_VERSION"), " (Windows)"))
+        .set(
+            "User-Agent",
+            concat!("codenotch/", env!("CARGO_PKG_VERSION"), " (Windows)"),
+        )
         .timeout(Duration::from_secs(15));
     if let Some(org) = &cred.org {
         req = req.set("x-opencode-org-id", org);
@@ -256,11 +372,16 @@ fn usage_url(cred: &Credential) -> &'static str {
 
 fn fetch(cred: &Credential) -> Result<serde_json::Value, FetchErr> {
     match get(usage_url(cred), cred).call() {
-        Ok(r) => r.into_json().map_err(|e| FetchErr::Other(format!("parse: {e}"))),
+        Ok(r) => r
+            .into_json()
+            .map_err(|e| FetchErr::Other(format!("parse: {e}"))),
         Err(ureq::Error::Status(401, _)) => Err(FetchErr::Unauthorized),
         Err(ureq::Error::Status(403, _)) => Err(FetchErr::Forbidden),
         Err(ureq::Error::Status(429, r)) => {
-            let ra = r.header("retry-after").and_then(|s| s.trim().parse::<u64>().ok()).unwrap_or(0);
+            let ra = r
+                .header("retry-after")
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .unwrap_or(0);
             Err(FetchErr::RateLimited(ra))
         }
         Err(ureq::Error::Status(code, _)) => Err(FetchErr::Other(format!("HTTP {code}"))),
@@ -275,49 +396,76 @@ fn signed_in(cred: &Credential) -> bool {
     if !cred.oauth {
         return false;
     }
-    let console = cred.console.as_deref().unwrap_or(DEFAULT_CONSOLE).trim_end_matches('/');
+    let console = cred
+        .console
+        .as_deref()
+        .filter(|s| trusted_console(s))
+        .unwrap_or(DEFAULT_CONSOLE)
+        .trim_end_matches('/');
     matches!(get(&format!("{console}/api/user"), cred).call(), Ok(r) if r.status() == 200)
+}
+
+fn trusted_console(url: &str) -> bool {
+    // Never forward a captured bearer token to an arbitrary metadata.server.
+    // Only the official console is a supported account-validation endpoint.
+    matches!(url.trim_end_matches('/'), "https://opencode.ai/console")
 }
 
 /// "2026-09-06T12:31:06.611Z" → ms epoch
 fn parse_reset(stamp: &str) -> Option<u64> {
-    chrono::DateTime::parse_from_rfc3339(stamp.trim()).ok().map(|d| d.timestamp_millis().max(0) as u64)
+    chrono::DateTime::parse_from_rfc3339(stamp.trim())
+        .ok()
+        .map(|d| d.timestamp_millis().max(0) as u64)
 }
 
 fn windows_from(v: &serde_json::Value) -> Vec<LimitWindow> {
-    let Some(usage) = v.get("usage") else { return Vec::new() };
-    [("rolling", "5-hour Limit"), ("weekly", "Weekly limit"), ("monthly", "Monthly limit")]
-        .iter()
-        .filter_map(|(id, label)| {
-            let entry = usage.get(*id)?;
-            let pct = entry.get("percent").and_then(|x| x.as_f64())?;
-            Some(LimitWindow {
-                id: (*id).into(),
-                label: (*label).into(),
-                used: (pct / 100.0).clamp(0.0, 1.0),
-                resets_at: entry.get("resetsAt").and_then(|x| x.as_str()).and_then(parse_reset),
-                ..Default::default()
-            })
+    let Some(usage) = v.get("usage") else {
+        return Vec::new();
+    };
+    [
+        ("rolling", "5-hour Limit"),
+        ("weekly", "Weekly limit"),
+        ("monthly", "Monthly limit"),
+    ]
+    .iter()
+    .filter_map(|(id, label)| {
+        let entry = usage.get(*id)?;
+        let pct = entry.get("percent").and_then(|x| x.as_f64())?;
+        Some(LimitWindow {
+            id: (*id).into(),
+            label: (*label).into(),
+            used: (pct / 100.0).clamp(0.0, 1.0),
+            resets_at: entry
+                .get("resetsAt")
+                .and_then(|x| x.as_str())
+                .and_then(parse_reset),
+            ..Default::default()
         })
-        .collect()
+    })
+    .collect()
 }
 
 // ---------------- Putting it together ----------------
 
-fn read_once() -> UsageSnapshot {
-    let mut snap = UsageSnapshot::default();
-    let held_until = BACKOFF_UNTIL.load(std::sync::atomic::Ordering::Relaxed);
+fn read_once(
+    prev: &UsageSnapshot,
+    captured: Option<Credential>,
+    installed: bool,
+    selection: &str,
+) -> UsageSnapshot {
+    let mut snap = prev.clone();
+    let (held_until, failures) = backoff_for(selection);
     let now = now_ms();
     if held_until > now {
         snap.backoff_until = held_until;
         snap.note = format!("Rate limited — retrying in {}s", (held_until - now) / 1000);
         return snap;
     }
-    if !present() {
+    if !installed {
         snap.status = "absent".into();
         return snap;
     }
-    let Some(cred) = load_credential() else {
+    let Some(cred) = captured else {
         snap.status = "needsAuth".into();
         snap.note = "Run opencode auth login to sign in to OpenCode.".into();
         return snap;
@@ -330,23 +478,28 @@ fn read_once() -> UsageSnapshot {
             if windows.is_empty() {
                 snap.status = "stale".into();
                 snap.note = "The Go plan reported no usage windows".into();
-                crate::applog("opencode: reply carried no usable windows, keeping the last reading");
+                crate::applog(
+                    "opencode: reply carried no usable windows, keeping the last reading",
+                );
                 return snap;
             }
             snap.status = "ok".into();
+            snap.backoff_until = 0;
             snap.windows = windows;
             snap.fetched_at = now_ms();
             snap.note = format!("Go · via {}", cred.source);
-            CONSECUTIVE_429.store(0, std::sync::atomic::Ordering::Relaxed);
+            remember_backoff(&selection, 0, 0);
         }
         Err(FetchErr::Forbidden) => {
             snap.status = "none".into();
+            snap.windows.clear();
             snap.fetched_at = now_ms();
             snap.note = "No OpenCode Go subscription on this account".into();
         }
         Err(FetchErr::Unauthorized) => {
             if signed_in(&cred) {
                 snap.status = "none".into();
+                snap.windows.clear();
                 snap.fetched_at = now_ms();
                 snap.note = "No OpenCode Go subscription on this account".into();
             } else {
@@ -360,14 +513,17 @@ fn read_once() -> UsageSnapshot {
                     "OpenCode rejected the opencode-go key, or it has no Go plan".into()
                 };
             }
-            crate::applog(&format!("opencode: usage endpoint answered 401, status={}", snap.status));
+            crate::applog(&format!(
+                "opencode: usage endpoint answered 401, status={}",
+                snap.status
+            ));
         }
         Err(FetchErr::RateLimited(ra)) => {
-            let n = CONSECUTIVE_429.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            let n = failures.saturating_add(1);
             let exp = BACKOFF_BASE_SECS.saturating_mul(1u64 << (n - 1).min(4));
             let wait = exp.clamp(BACKOFF_BASE_SECS, BACKOFF_CAP_SECS).max(ra);
             let until = now_ms() + wait * 1000;
-            BACKOFF_UNTIL.store(until, std::sync::atomic::Ordering::Relaxed);
+            remember_backoff(&selection, until, n);
             snap.backoff_until = until;
             snap.note = format!("Rate limited — retrying in {wait}s");
             crate::applog(&format!("opencode: 429 (x{n}), retrying in {wait}s"));
@@ -381,38 +537,46 @@ fn read_once() -> UsageSnapshot {
     snap
 }
 
-fn broadcast(app: &AppHandle, snap: UsageSnapshot) {
-    let st = app.state::<AppState>();
-    *st.opencode.lock().unwrap() = snap.clone();
-    persist(&snap);
-    let _ = app.emit("opencode", &snap);
+fn broadcast(app: &AppHandle, snap: UsageSnapshot, selection: &str) {
+    let _ = crate::accounts::with_selection("opencode", selection, || {
+        let st = app.state::<AppState>();
+        *st.opencode.lock().unwrap() = snap.clone();
+        let _ = app.emit("opencode", &snap);
+    });
 }
 
 pub fn start(app: AppHandle) {
     std::thread::spawn(move || {
-        {
-            let st = app.state::<AppState>();
-            let snap = st.opencode.lock().unwrap().clone();
-            let _ = app.emit("opencode", &snap);
-        }
-        if !present() {
-            broadcast(&app, UsageSnapshot { status: "absent".into(), ..Default::default() });
-            loop {
-                for _ in 0..600 {
-                    if REFRESH.swap(false, std::sync::atomic::Ordering::Relaxed) {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_secs(1));
-                }
-                if present() {
-                    break;
-                }
-            }
-        }
         loop {
-            let snap = read_once();
+            let selection = crate::accounts::selection_key("opencode");
+            // Freeze the credential and its cache while account switching is
+            // locked. Network I/O then runs without holding the settings lock.
+            let Some((prev, cache, creds, installed)) =
+                crate::accounts::with_selection("opencode", &selection, || {
+                    (load_persisted(), store_path(), load_credential(), present())
+                })
+            else {
+                continue;
+            };
+            let snap = if installed {
+                read_once(&prev, creds, installed, &selection)
+            } else {
+                UsageSnapshot {
+                    status: "absent".into(),
+                    ..Default::default()
+                }
+            };
             let hold = snap.backoff_until.saturating_sub(now_ms()) / 1000;
-            broadcast(&app, snap);
+            // An old credential must not restore cached usage after a profile
+            // reconnect. Preserve only provider Retry-After on rejected reads.
+            if crate::accounts::with_selection("opencode", &selection, || {
+                crate::agy_cli::save_persisted_to(&cache, &snap)
+            })
+            .is_none()
+            {
+                crate::accounts::preserve_backoff(&cache, snap.backoff_until);
+            }
+            broadcast(&app, snap, &selection);
             for _ in 0..POLL_SECS.max(hold) {
                 if REFRESH.swap(false, std::sync::atomic::Ordering::Relaxed) {
                     break;
@@ -428,17 +592,56 @@ pub fn probe() -> String {
     match load_credential() {
         Some(c) => format!(
             "OpenCode: {} via {}{}",
-            if c.oauth { "OAuth sign-in → inference/go/v1/usage" } else { "opencode-go key → zen/go/v1/usage" },
+            if c.oauth {
+                "OAuth sign-in → inference/go/v1/usage"
+            } else {
+                "opencode-go key → zen/go/v1/usage"
+            },
             c.source,
-            if c.expires.is_some_and(|e| e <= now_ms()) { " (expired — open OpenCode to renew)" } else { "" }
+            if c.expires.is_some_and(|e| e <= now_ms()) {
+                " (expired — open OpenCode to renew)"
+            } else {
+                ""
+            }
         ),
-        None if present() => "OpenCode: installed but not signed in (no opencode-go key or OAuth credential)".into(),
+        None if present() => {
+            "OpenCode: installed but not signed in (no opencode-go key or OAuth credential)".into()
+        }
         None => "OpenCode: not installed (no ~/.local/share/opencode)".into(),
     }
 }
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn oauth_metadata_cannot_send_a_bearer_to_an_arbitrary_server() {
+        for server in [
+            "https://attacker.example/console",
+            "https://opencode.ai.attacker.example/console",
+            "http://opencode.ai/console",
+            "https://opencode.ai:443/console",
+            "https://opencode.ai@attacker.example/console",
+        ] {
+            let c = credential_from(&serde_json::json!({"type":"oauth","access":"synthetic-token","metadata":{"server":server}}), "test").unwrap();
+            assert_eq!(c.console, None);
+        }
+        assert!(trusted_console("https://opencode.ai/console/"));
+    }
+
+    #[test]
+    fn isolated_capture_reads_the_go_key_from_its_own_profile() {
+        let root =
+            std::env::temp_dir().join(format!("codenotch-opencode-profile-{}", std::process::id()));
+        let data = root.join("data").join("opencode");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(data.join("auth.json"), r#"{"opencode-go":{"type":"api","key":"synthetic-own-profile-key"},"openrouter":{"type":"api","key":"other-provider"}}"#).unwrap();
+        let secret = capture_credential_in(&root).unwrap();
+        let entry: serde_json::Value = serde_json::from_str(&secret).unwrap();
+        assert_eq!(entry["key"], "synthetic-own-profile-key");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     use super::*;
 
     #[test]
@@ -483,16 +686,27 @@ mod tests {
     #[test]
     fn the_database_writes_expires_as_a_string() {
         let v = serde_json::json!({"type":"oauth","access":"st_abc","expires":"1792877970039"});
-        assert_eq!(credential_from(&v, "OpenCode").unwrap().expires, Some(1792877970039));
+        assert_eq!(
+            credential_from(&v, "OpenCode").unwrap().expires,
+            Some(1792877970039)
+        );
     }
 
     /// The zen/go route refuses an OAuth token and the inference route a Go key, each with a 401
     /// indistinguishable from "no Go plan", so the pairing is the whole fix.
     #[test]
     fn each_credential_goes_to_the_route_that_accepts_it() {
-        let oauth = credential_from(&serde_json::json!({"type":"oauth","access":"st_x"}), "OpenCode").unwrap();
-        let key = credential_from(&serde_json::json!({"type":"api","key":"sk-go"}), "OpenCode").unwrap();
-        assert_eq!(usage_url(&oauth), "https://opencode.ai/inference/go/v1/usage");
+        let oauth = credential_from(
+            &serde_json::json!({"type":"oauth","access":"st_x"}),
+            "OpenCode",
+        )
+        .unwrap();
+        let key =
+            credential_from(&serde_json::json!({"type":"api","key":"sk-go"}), "OpenCode").unwrap();
+        assert_eq!(
+            usage_url(&oauth),
+            "https://opencode.ai/inference/go/v1/usage"
+        );
         assert_eq!(usage_url(&key), "https://opencode.ai/zen/go/v1/usage");
     }
 
@@ -502,8 +716,15 @@ mod tests {
         let key = credential_from(&v, "OpenCode").unwrap();
         assert_eq!(key.token, "sk-go");
         assert!(!key.oauth);
-        assert_eq!(credential_from(&serde_json::json!("sk-bare"), "OpenCode").unwrap().token, "sk-bare");
-        assert!(credential_from(&serde_json::json!({"type":"oauth","access":""}), "OpenCode").is_none());
+        assert_eq!(
+            credential_from(&serde_json::json!("sk-bare"), "OpenCode")
+                .unwrap()
+                .token,
+            "sk-bare"
+        );
+        assert!(
+            credential_from(&serde_json::json!({"type":"oauth","access":""}), "OpenCode").is_none()
+        );
     }
 
     fn db_with(rows: &[(&str, &str, Option<i64>, i64)]) -> rusqlite::Connection {
@@ -528,7 +749,12 @@ mod tests {
     fn db_picks_the_opencode_sign_in_and_ignores_other_vendors() {
         let c = db_with(&[
             ("openrouter", r#"{"type":"api","key":"sk-or"}"#, None, 5),
-            ("opencode", r#"{"type":"oauth","access":"st_new","metadata":{"orgID":"org_1"}}"#, Some(1), 3),
+            (
+                "opencode",
+                r#"{"type":"oauth","access":"st_new","metadata":{"orgID":"org_1"}}"#,
+                Some(1),
+                3,
+            ),
         ]);
         let got = credential_from_db(&c).unwrap();
         assert_eq!(got.token, "st_new");
@@ -541,14 +767,29 @@ mod tests {
     #[test]
     fn db_prefers_a_go_key_and_skips_inactive_rows() {
         let c = db_with(&[
-            ("opencode", r#"{"type":"oauth","access":"st_oauth"}"#, Some(1), 9),
+            (
+                "opencode",
+                r#"{"type":"oauth","access":"st_oauth"}"#,
+                Some(1),
+                9,
+            ),
             ("opencode-go", r#"{"type":"api","key":"sk-go"}"#, None, 1),
         ]);
         assert_eq!(credential_from_db(&c).unwrap().token, "sk-go");
 
         let c = db_with(&[
-            ("opencode", r#"{"type":"oauth","access":"st_old"}"#, Some(0), 9),
-            ("opencode", r#"{"type":"oauth","access":"st_live"}"#, Some(1), 1),
+            (
+                "opencode",
+                r#"{"type":"oauth","access":"st_old"}"#,
+                Some(0),
+                9,
+            ),
+            (
+                "opencode",
+                r#"{"type":"oauth","access":"st_live"}"#,
+                Some(1),
+                1,
+            ),
         ]);
         assert_eq!(credential_from_db(&c).unwrap().token, "st_live");
     }

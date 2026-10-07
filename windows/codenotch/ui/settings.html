@@ -179,6 +179,68 @@
   #reset-error{color:var(--danger);font-size:11px;line-height:1.5;margin-top:8px;overflow-wrap:anywhere}
   .reset-notification-copy{font-size:11px;color:var(--text2);margin:4px 0 0;line-height:1.5;max-width:290px}
   #pane-resets .item{padding:11px 12px}
+  .reset-live-strip{display:flex;justify-content:space-between;gap:10px;align-items:center;font-size:10px;color:var(--text2);margin:7px 2px 12px;font-variant-numeric:tabular-nums}
+  #reset-next-check{color:var(--reset-green);white-space:nowrap}
+  .reset-banked{padding:13px 14px;border-radius:11px;border:1px solid rgba(169,136,245,.22);background:linear-gradient(115deg,rgba(140,105,237,.1),var(--group))}
+  .reset-banked-head{display:flex;justify-content:space-between;align-items:center;gap:8px}
+  .reset-banked h2{font-size:13px;margin:0;font-weight:600}
+  .reset-banked-state{font-size:10px;font-weight:600;color:#bca2ff;background:rgba(153,112,245,.13);padding:3px 7px;border-radius:5px;white-space:nowrap}
+  :root[data-theme="light"] .reset-banked-state{color:#6e45b5}
+  .reset-banked-summary{font-size:12px;line-height:1.5;margin:9px 0 6px;overflow-wrap:anywhere}
+  .reset-banked-detail{font-size:10px;color:var(--text2);line-height:1.5}
+  .reset-services{display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin:12px 1px;font-size:10px;color:var(--text2)}
+  .reset-service{display:inline-flex;align-items:center;gap:5px;padding:3px 7px;background:var(--seg-bg);border-radius:5px}
+  .reset-service::before{content:"";width:5px;height:5px;border-radius:50%;background:var(--text3)}
+  .reset-service[data-status="operational"]::before{background:var(--reset-green)}
+  .reset-service[data-status="degraded"]::before{background:#e0a957}
+  .reset-source-age{font-size:10px;color:var(--text2);margin:5px 2px 0;line-height:1.5}
+  .reset-event-head{display:flex;align-items:center;gap:7px;margin-bottom:5px}
+  .reset-event-kind{font-size:9px;text-transform:uppercase;letter-spacing:.6px;padding:2px 5px;border-radius:4px;background:var(--seg-bg);color:var(--text2)}
+  .reset-event-kind[data-kind="banked"]{color:#bca2ff;background:rgba(153,112,245,.12)}
+  :root[data-theme="light"] .reset-event-kind[data-kind="banked"]{color:#6e45b5}
+  #reset-history-filter{gap:0;flex-wrap:wrap}
+  #reset-history-filter button{font-size:10px;padding:3px 8px}
+  .profiles-intro{margin:6px 0 14px;padding:14px;border:1px solid var(--line);border-radius:12px;background:linear-gradient(120deg,rgba(10,122,255,.1),var(--group))}
+  .profiles-intro h2{margin:0;font-size:17px;font-weight:600;letter-spacing:-.3px}
+  .profiles-intro p{font-size:11px;color:var(--text2);line-height:1.5;margin:6px 0 10px}
+  .profiles-toolbar{display:flex;gap:7px;align-items:center;flex-wrap:wrap}
+  .profiles-toolbar .btn{font-size:11px}
+  .profiles-toolbar .primary{background:var(--accent);color:var(--on-accent)}
+  .profile-provider{margin-bottom:10px;background:var(--group);border:1px solid var(--line);border-radius:11px;overflow:hidden}
+  .profile-provider-head{display:flex;align-items:center;justify-content:space-between;gap:7px;padding:11px 12px}
+  .profile-provider-title{display:flex;align-items:center;gap:8px;font-weight:600}
+  .profile-provider-title .glyph{color:var(--text)}
+  .profile-capability{font-size:9px;color:var(--text2);border:1px solid var(--line);padding:2px 5px;border-radius:4px}
+  .profile-account{padding:11px 12px;border-top:1px solid var(--line)}
+  .profile-account.active{background:rgba(10,122,255,.045)}
+  .profile-account-title{display:flex;align-items:center;gap:7px;font-size:12px;font-weight:600;min-width:0;overflow-wrap:anywhere}
+  .profile-active{font-size:9px;font-weight:500;background:rgba(10,122,255,.12);color:var(--accent);border-radius:4px;padding:2px 5px;flex:none}
+  .profile-identity{font-size:10px;color:var(--text2);margin-top:4px;overflow-wrap:anywhere}
+  .profile-account-bottom{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:8px;flex-wrap:wrap}
+  .profile-status{font-size:10px;color:var(--text2);display:flex;align-items:center;gap:5px}
+  .profile-status::before{content:"";width:5px;height:5px;border-radius:50%;background:var(--text3)}
+  .profile-status[data-status="connected"]{color:#4cc7a0}
+  :root[data-theme="light"] .profile-status[data-status="connected"]{color:#007f61}
+  .profile-status[data-status="connected"]::before{background:currentColor}
+  .profile-controls{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
+  .profile-controls .btn{font-size:10px;padding:4px 8px}
+  .profile-controls .remove{background:transparent;color:var(--text2)}
+  .profile-login-note{font-size:10px;color:var(--text2);line-height:1.5;margin-top:7px;overflow-wrap:anywhere}
+  .profile-provider-note{padding:0 12px 11px;font-size:10px;color:var(--text2);line-height:1.5}
+  .profile-empty{padding:0 12px 12px;color:var(--text2);font-size:11px}
+  .profile-empty .link{font-size:11px}
+  #profiles-message{font-size:11px;color:var(--text2);margin:8px 0 0;overflow-wrap:anywhere}
+  .profile-dialog{width:390px;max-width:calc(100vw - 40px);border:1px solid var(--line);border-radius:15px;padding:18px;background:#292a2e;color:var(--text);box-shadow:0 20px 80px rgba(0,0,0,.4)}
+  :root[data-theme="light"] .profile-dialog{background:#f8f8fa}
+  .profile-dialog::backdrop{background:rgba(0,0,0,.35);backdrop-filter:blur(3px)}
+  .profile-dialog-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}
+  .profile-dialog h2{margin:0;font-size:17px;font-weight:600}
+  .profile-dialog label{display:block;font-size:12px;margin:11px 0 5px}
+  .profile-dialog input,.profile-dialog select{display:block;width:100%;font:inherit;border:1px solid var(--line);background:var(--seg-bg);color:var(--text);border-radius:7px;padding:8px 10px;user-select:text}
+  .profile-dialog p{font-size:11px;color:var(--text2);line-height:1.5;margin:10px 0}
+  .profile-dialog-actions{display:flex;justify-content:flex-end;gap:7px;margin-top:16px}
+  .profile-dialog .primary{background:var(--accent);color:var(--on-accent)}
+  #profile-dialog-error{color:var(--danger);font-size:11px;line-height:1.5;margin-top:10px}
   @media (max-width:560px){#side{width:165px}.reset-cards{grid-template-columns:1fr}.reset-hero{padding:14px}.reset-hero h2{font-size:18px}}
 </style>
 </head>
@@ -203,10 +265,12 @@
     <div id="body">
 
       <section class="pane" id="pane-accounts" role="tabpanel" aria-labelledby="tab-accounts" hidden>
-        <div class="sec">Connected</div>
+        <div class="profiles-intro"><h2>Your accounts, one place</h2><p>Keep separate profiles for work and personal accounts. Choose which account Codenotch tracks for each provider.</p><div class="profiles-toolbar"><button class="btn primary" id="btn-account-add" disabled>Add account</button><button class="btn" id="btn-account-detect">Detect existing</button><button class="btn" id="btn-account-refresh">Refresh</button></div><div id="profiles-message" data-dynamic role="status">Reading account profiles…</div></div>
+        <div id="account-profiles" data-dynamic></div>
+        <div class="sec">On the notch</div>
         <div class="group" id="acc-on" data-dynamic></div>
         <div id="acc-off-wrap" hidden>
-          <div class="sec">Not connected</div>
+          <div class="sec">Off the notch</div>
           <div class="group" id="acc-off" data-dynamic></div>
         </div>
       </section>
@@ -221,7 +285,10 @@
           <p class="reset-summary" id="reset-summary" data-dynamic>Public reset announcements, alongside your personal Codex windows.</p>
           <div class="reset-foot"><span>Public announcements</span><button class="link" id="btn-reset-source" title="https://codex-reset.com/">Source: codex-reset.com ↗</button></div>
         </div>
-        <div class="reset-chapter"><h2>Your Codex windows</h2><span class="reset-tag">Personal</span></div>
+        <div class="reset-live-strip"><span id="reset-updated" data-dynamic>Waiting for first check</span><span id="reset-next-check" data-dynamic>Automatic checks every minute</span></div>
+        <div class="reset-banked"><div class="reset-banked-head"><h2>Banked reset</h2><span id="reset-banked-state" class="reset-banked-state" data-dynamic>Unknown</span></div><p id="reset-banked-summary" class="reset-banked-summary" data-dynamic>Checking the public banked-reset status…</p><div id="reset-banked-detail" class="reset-banked-detail" data-dynamic>Public announcement status. Your own credits must be checked in your account.</div></div>
+        <div id="reset-services" class="reset-services" data-dynamic></div>
+        <div class="reset-chapter"><h2>Your Codex windows</h2><span id="reset-personal-profile" class="reset-tag" data-dynamic>Personal</span></div>
         <div class="reset-cards" id="reset-personal-windows" data-dynamic></div>
         <p class="reset-note" id="reset-personal-note" data-dynamic>Reading your account usage…</p>
         <div class="reset-chapter"><h2>Global reset outlook</h2><span class="reset-tag">Historical estimate</span></div>
@@ -232,14 +299,17 @@
           </div>
           <div id="reset-forecast-note" class="reset-estimate-note" data-dynamic>Based on past reset intervals. This is an estimate, not a scheduled reset.</div>
         </div>
-        <div class="reset-chapter"><h2>Verified reset history</h2><span class="reset-tag">Global</span></div>
-        <ol id="reset-history" class="reset-timeline" data-dynamic aria-label="Verified global reset history"></ol>
-        <div class="reset-actions"><span id="reset-updated" data-dynamic>Waiting for first check</span><button class="btn" id="btn-reset-refresh" data-dynamic>Refresh</button></div>
+        <div class="reset-chapter"><h2>Public announcements</h2><span class="reset-tag">All statuses</span></div>
+        <div class="reset-actions" style="margin-bottom:8px"><span class="seg" id="reset-history-filter" aria-label="Announcement filter"><button data-kind="all" class="on" aria-pressed="true">All</button><button data-kind="reset" aria-pressed="false">Resets</button><button data-kind="banked" aria-pressed="false">Banked</button><button data-kind="boost" aria-pressed="false">Boosts</button></span><button class="btn" id="btn-reset-refresh" data-dynamic>Refresh</button></div>
+        <ol id="reset-history" class="reset-timeline" data-dynamic aria-label="Public reset announcements"></ol>
+        <p id="reset-source-age" class="reset-source-age" data-dynamic></p>
         <div id="reset-error" data-dynamic role="status" hidden></div>
         <div class="reset-chapter"><h2>Stay in the loop</h2></div>
         <div class="group">
           <div class="item"><div><span>Global reset notifications</span><p class="reset-notification-copy">Get a card when a new verified announcement appears, even with the notch hidden.</p></div><button class="switch" id="sw-global-reset" role="switch" aria-checked="false" aria-label="Global reset notifications" disabled></button></div>
           <div class="item"><span class="hint">See how the announcement card looks.</span><button class="btn" id="btn-global-reset-preview">Test notification</button></div>
+          <div class="item"><div><span>Banked reset notifications</span><p class="reset-notification-copy">Follow new banked announcements and public availability changes. Your personal reset clock stays separate.</p></div><button class="switch" id="sw-banked-reset" role="switch" aria-checked="false" aria-label="Banked reset notifications" disabled></button></div>
+          <div class="item"><span class="hint">Preview a banked status card.</span><button class="btn" id="btn-banked-reset-preview">Test banked card</button></div>
         </div>
         <p class="reset-note">Global announcements cover Codex and ChatGPT Work. Check your account to confirm your own allowance; ordinary ChatGPT message limits are separate.</p>
       </section>
@@ -324,6 +394,15 @@
     </div>
   </main>
 </div>
+<dialog id="profile-dialog" class="profile-dialog" aria-labelledby="profile-dialog-title">
+  <form id="profile-dialog-form">
+    <div class="profile-dialog-head"><h2 id="profile-dialog-title" data-dynamic>Add account</h2><button class="btn" type="button" id="btn-profile-cancel" aria-label="Close account dialog">×</button></div>
+    <div id="profile-create-fields"><label for="profile-provider">Provider</label><select id="profile-provider" aria-label="Provider"></select><label for="profile-label">Account name</label><input id="profile-label" maxlength="48" placeholder="Work, personal, or a team name" autocomplete="off" required></div>
+    <div id="profile-key-fields" hidden><label for="profile-credential">API key or provider token</label><input id="profile-credential" type="password" autocomplete="new-password" spellcheck="false"><p>The key is sent directly to Codenotch and stored encrypted on this Windows account. It is never shown again.</p></div>
+    <p id="profile-dialog-note" data-dynamic></p><div id="profile-dialog-error" data-dynamic role="status" hidden></div>
+    <div class="profile-dialog-actions"><button class="btn" type="button" id="btn-profile-back">Cancel</button><button class="btn primary" type="submit" id="btn-profile-submit" data-dynamic>Create and connect</button></div>
+  </form>
+</dialog>
 <div id="toast" data-dynamic>Saved</div>
 
 <script>
@@ -1219,6 +1298,8 @@ function showTab(id, moveFocus){
   document.getElementById('body').scrollTop = 0;
   try { localStorage.setItem(TAB_KEY, id); } catch(e) { /* not remembered, that is all */ }
   if(moveFocus) document.getElementById('tab-' + id).focus();
+  if(id === 'resets') requestGlobalResetRefresh(true);
+  if(id === 'accounts') refreshAccountProfiles();
 }
 function savedTab(){
   try { const v = localStorage.getItem(TAB_KEY); return TABS.indexOf(v) >= 0 ? v : TABS[0]; }
@@ -1412,6 +1493,212 @@ accountsPane.addEventListener('change', e => {
     .then(v => { agPrefs = v; renderAccounts(); toast(); })
     .catch(err => { renderAccounts(); strip('set_antigravity_prefs failed: ' + errText(err)); });
 });
+
+/* ---- account profiles -----------------------------------------------------
+   Only profile labels, identities and credential/authentication status reach this page. Existing
+   credentials stay in the native process. A manually entered key is cleared before its IPC call. */
+let accountProfilesState = null, accountProfilesRevision = 0, accountActionBusy = false;
+const accountLoginStates = new Map();
+let profileDialogMode = 'create', profileDialogTarget = null;
+const accountNode = id => document.getElementById(id);
+function accountProviders(){
+  return accountProfilesState && Array.isArray(accountProfilesState.providers) ? accountProfilesState.providers.filter(p => p && typeof p.id === 'string') : [];
+}
+function activeProfileFor(provider){
+  const p = accountProviders().find(p => p.id === provider);
+  return p && Array.isArray(p.accounts) ? p.accounts.find(a => a && (a.active || a.id === p.active_account_id)) || null : null;
+}
+function profileElement(tag, className, text){
+  const node = document.createElement(tag);
+  if(className) node.className = className;
+  if(text !== undefined) node.textContent = text;
+  return node;
+}
+function profileButton(label, action, provider, accountId, extraClass){
+  const button = profileElement('button', 'btn' + (extraClass ? ' ' + extraClass : ''), ui(label, label));
+  button.type = 'button'; button.dataset.accountAction = action; button.dataset.provider = provider;
+  if(accountId) button.dataset.accountId = accountId;
+  button.disabled = accountActionBusy;
+  return button;
+}
+function profileAuthStatus(account, now){
+  if(account.status === 'connected' && typeof account.verified_at === 'number' && account.verified_at > 0
+    && account.verified_at <= now + 60000 && now - account.verified_at <= 300000) return {label:'Connected',status:'connected'};
+  if(account.status === 'expired') return {label:'Sign-in expired',status:'expired'};
+  if(account.status === 'saved' || account.status === 'connected') return {label:'Credentials saved',status:'saved'};
+  return {label:'Sign in needed',status:'needsAuth'};
+}
+function renderAccountProfiles(){
+  const holder = accountNode('account-profiles'); holder.replaceChildren();
+  const providers = accountProviders();
+  accountNode('btn-account-add').disabled = accountActionBusy || !providers.length;
+  accountNode('btn-account-detect').disabled = accountActionBusy;
+  accountNode('btn-account-refresh').disabled = accountActionBusy;
+  if(!providers.length){
+    holder.appendChild(profileElement('div','reset-empty',ui('Account profiles will appear when Codenotch connects.', 'Account profiles will appear when Codenotch connects.')));
+    return;
+  }
+  for(const provider of providers){
+    const box = profileElement('div','profile-provider');
+    const head = profileElement('div','profile-provider-head');
+    const title = profileElement('div','profile-provider-title');
+    title.appendChild(profileElement('span','glyph letter',(provider.label || provider.id).charAt(0).toUpperCase()));
+    title.appendChild(profileElement('span','',provider.label || provider.id)); head.appendChild(title);
+    head.appendChild(profileElement('span','profile-capability',{cli:'CLI sign-in',desktop:'App connection',api_key:'API key'}[provider.login_mode] || 'Provider connection'));
+    box.appendChild(head);
+    const accounts = Array.isArray(provider.accounts) ? provider.accounts.filter(a => a && typeof a.id === 'string') : [];
+    if(!accounts.length){
+      const empty = profileElement('div','profile-empty',ui('No accounts yet. ', 'No accounts yet. '));
+      empty.appendChild(profileButton('Add account','add',provider.id)); box.appendChild(empty);
+    }
+    for(const account of accounts){
+      const active = account.active || account.id === provider.active_account_id;
+      const row = profileElement('div','profile-account' + (active ? ' active' : ''));
+      const heading = profileElement('div','profile-account-title');
+      heading.appendChild(profileElement('span','',String(account.label || 'Account').slice(0,80)));
+      if(active) heading.appendChild(profileElement('span','profile-active',ui('Tracking', 'Tracking')));
+      row.appendChild(heading);
+      if(account.identity) row.appendChild(profileElement('div','profile-identity',String(account.identity).slice(0,160)));
+      const login = accountLoginStates.get(provider.id + ':' + account.id);
+      const auth = profileAuthStatus(account,Date.now());
+      const bottom = profileElement('div','profile-account-bottom');
+      const status = profileElement('span','profile-status',ui(login && login.busy ? 'Signing in…' : auth.label,login && login.busy ? 'Signing in…' : auth.label));
+      status.dataset.status = login && login.busy ? 'loading' : auth.status; bottom.appendChild(status);
+      const controls = profileElement('div','profile-controls');
+      if(!active) controls.appendChild(profileButton('Use','select',provider.id,account.id));
+      if(provider.login_mode === 'api_key' || provider.manual_key_available) controls.appendChild(profileButton('Connect key','key',provider.id,account.id));
+      if(provider.login_mode !== 'api_key' && provider.login_available){
+        const signin = profileButton(provider.login_mode === 'desktop' ? 'Open sign-in' : auth.status === 'connected' ? 'Sign in again' : 'Sign in','login',provider.id,account.id);
+        signin.disabled = accountActionBusy || !!(login && login.busy); controls.appendChild(signin);
+      }
+      controls.appendChild(profileButton('Remove','remove',provider.id,account.id,'remove')); bottom.appendChild(controls); row.appendChild(bottom);
+      if(login && login.note) row.appendChild(profileElement('div','profile-login-note',String(login.note).slice(0,300)));
+      box.appendChild(row);
+    }
+    if(provider.login_note) box.appendChild(profileElement('div','profile-provider-note',String(provider.login_note).slice(0,360)));
+    holder.appendChild(box);
+  }
+}
+function applyAccountProfiles(state){
+  if(!state || !Array.isArray(state.providers)) return;
+  const previous = activeProfileFor('codex');
+  accountProfilesState = state;
+  const current = activeProfileFor('codex');
+  if(previous && (!current || previous.id !== current.id)){
+    // Never relabel the previous account's quota as the newly selected account's reading.
+    codexResetState = null; codexResetRevision++;
+    refreshCodexResets();
+  }
+  renderAccountProfiles(); renderResetTracker();
+  accountNode('profiles-message').textContent = ui('Only the selected profile is used for each provider.', 'Only the selected profile is used for each provider.');
+}
+async function refreshAccountProfiles(){
+  const revision = accountProfilesRevision;
+  try { const state = await invoke('list_provider_accounts'); if(revision === accountProfilesRevision) applyAccountProfiles(state); }
+  catch(e){ accountNode('profiles-message').textContent = ui('Account profiles could not be read. ', 'Account profiles could not be read. ') + errText(e); }
+}
+async function runAccountAction(command,args){
+  if(accountActionBusy) return null;
+  accountActionBusy = true; renderAccountProfiles();
+  const revision = accountProfilesRevision;
+  try {
+    const result = await invoke(command,args);
+    if(result && Array.isArray(result.providers) && revision === accountProfilesRevision) applyAccountProfiles(result);
+    else await refreshAccountProfiles();
+    return result;
+  } catch(e){
+    accountNode('profiles-message').textContent = errText(e);
+    throw e;
+  } finally { accountActionBusy = false; renderAccountProfiles(); }
+}
+function closeProfileDialog(){
+  accountNode('profile-credential').value = '';
+  accountNode('profile-dialog').close(); profileDialogTarget = null;
+}
+function updateProfileDialogNote(){
+  const provider = accountProviders().find(p => p.id === accountNode('profile-provider').value);
+  accountNode('profile-dialog-note').textContent = provider ? provider.login_note || (provider.login_mode === 'api_key'
+    ? 'Create a named profile, then connect its API key.' : 'Create a named profile, then finish the provider’s own sign-in.') : '';
+}
+function openProfileDialog(providerId,accountId){
+  const providers = accountProviders(); if(!providers.length) return;
+  profileDialogMode = accountId ? 'key' : 'create';
+  profileDialogTarget = accountId ? {provider:providerId,accountId} : null;
+  const select = accountNode('profile-provider'); select.replaceChildren();
+  for(const provider of providers){
+    const option = profileElement('option','',provider.label || provider.id); option.value = provider.id; select.appendChild(option);
+  }
+  if(providerId) select.value = providerId;
+  accountNode('profile-label').value = '';
+  accountNode('profile-label').required = profileDialogMode === 'create';
+  accountNode('profile-credential').value = ''; accountNode('profile-credential').required = profileDialogMode === 'key';
+  accountNode('profile-create-fields').hidden = profileDialogMode !== 'create';
+  accountNode('profile-key-fields').hidden = profileDialogMode !== 'key';
+  accountNode('profile-dialog-title').textContent = ui(profileDialogMode === 'key' ? 'Connect account' : 'Add account',profileDialogMode === 'key' ? 'Connect account' : 'Add account');
+  accountNode('btn-profile-submit').textContent = ui(profileDialogMode === 'key' ? 'Save and connect' : 'Create and connect',profileDialogMode === 'key' ? 'Save and connect' : 'Create and connect');
+  accountNode('profile-dialog-error').hidden = true;
+  if(profileDialogMode === 'key') accountNode('profile-dialog-note').textContent = 'Use a key belonging to this provider and account. Account quotas remain separate from API billing.';
+  else updateProfileDialogNote();
+  accountNode('profile-dialog').showModal();
+  (profileDialogMode === 'key' ? accountNode('profile-credential') : accountNode('profile-label')).focus();
+}
+accountNode('profile-provider').addEventListener('change',updateProfileDialogNote);
+accountNode('btn-profile-cancel').addEventListener('click',closeProfileDialog);
+accountNode('btn-profile-back').addEventListener('click',closeProfileDialog);
+accountNode('profile-dialog').addEventListener('close',() => { accountNode('profile-credential').value = ''; });
+accountNode('profile-dialog-form').addEventListener('submit',async e => {
+  e.preventDefault();
+  const button = accountNode('btn-profile-submit'); if(button.disabled) return;
+  button.disabled = true; accountNode('profile-dialog-error').hidden = true;
+  try {
+    if(profileDialogMode === 'key'){
+      const credential = accountNode('profile-credential').value.trim();
+      accountNode('profile-credential').value = '';
+      if(!credential) throw new Error('Enter the provider key.');
+      await runAccountAction('connect_provider_account',{...profileDialogTarget,credential});
+      closeProfileDialog();
+    } else {
+      const provider = accountProviders().find(p => p.id === accountNode('profile-provider').value);
+      const label = accountNode('profile-label').value.trim();
+      if(!provider || !label) throw new Error('Choose a provider and an account name.');
+      const account = await runAccountAction('add_provider_account',{provider:provider.id,label});
+      closeProfileDialog();
+      if(account && account.id){
+        if(provider.login_mode === 'api_key') openProfileDialog(provider.id,account.id);
+        else if(provider.login_available) await runAccountAction('provider_sign_in',{provider:provider.id,accountId:account.id});
+      }
+    }
+  } catch(error){
+    const text = errText(error);
+    if(accountNode('profile-dialog').open){ accountNode('profile-dialog-error').textContent = text; accountNode('profile-dialog-error').hidden = false; }
+    else accountNode('profiles-message').textContent = text;
+  } finally { button.disabled = false; }
+});
+accountNode('btn-account-add').addEventListener('click',() => openProfileDialog());
+accountNode('btn-account-refresh').addEventListener('click',() => refreshAccountProfiles());
+accountNode('btn-account-detect').addEventListener('click',() => {
+  runAccountAction('detect_provider_accounts',{provider:null}).catch(() => {});
+});
+accountNode('account-profiles').addEventListener('click',e => {
+  const button = e.target.closest('[data-account-action]'); if(!button || button.disabled) return;
+  const {accountAction,provider,accountId} = button.dataset;
+  if(accountAction === 'add'){openProfileDialog(provider);return;}
+  if(accountAction === 'key'){openProfileDialog(provider,accountId);return;}
+  const command = {select:'select_provider_account',remove:'remove_provider_account',login:'provider_sign_in'}[accountAction];
+  if(command) runAccountAction(command,{provider,accountId}).catch(() => {});
+});
+try {
+  Promise.resolve(window.__TAURI__.event.listen('accounts-updated',e => {
+    accountProfilesRevision++;
+    if(e.payload && Array.isArray(e.payload.providers)) applyAccountProfiles(e.payload); else refreshAccountProfiles();
+  })).catch(() => {});
+  Promise.resolve(window.__TAURI__.event.listen('provider-account-login',e => {
+    const state = e.payload;
+    if(!state || typeof state.provider !== 'string' || typeof state.profile_id !== 'string') return;
+    accountLoginStates.set(state.provider + ':' + state.profile_id,{busy:state.busy === true,note:typeof state.note === 'string' ? state.note : ''});
+    renderAccountProfiles(); if(!state.busy) refreshAccountProfiles();
+  })).catch(() => {});
+} catch(e) { /* Read profiles on opening the pane and returning to this window. */ }
 
 /* ---- Appearance: Show, and App icon -------------------------------------
    Two choices, one command. Hiding both would leave nothing to click, so Rust keeps the tray icon
@@ -1784,7 +2071,7 @@ document.getElementById('author').addEventListener('click', () => {
    Public announcements and personal account windows are separate data sources. A countdown reaching
    zero never confirms a reset; only a new account reading can do that. External strings are placed
    with textContent, and the source button opens a fixed, Rust-validated destination. */
-let globalResetState = null, codexResetState = null, globalResetBusy = false, globalResetRevision = 0, codexResetRevision = 0;
+let globalResetState = null, codexResetState = null, globalResetBusy = false, globalResetRevision = 0, codexResetRevision = 0, resetHistoryFilter = 'all', lastGlobalResetRequest = 0;
 const resetNode = id => document.getElementById(id);
 const validResetTime = ms => typeof ms === 'number' && Number.isFinite(ms) && ms > 0 && ms <= 8640000000000000;
 function resetDate(ms){
@@ -1801,6 +2088,24 @@ function resetAgo(ms, now){
   const hours = Math.floor(mins / 60);
   if(hours < 24) return hours + ' ' + ui('h ago', 'h ago');
   return Math.floor(hours / 24) + ' ' + ui('days ago', 'days ago');
+}
+function resetCheckAgo(ms,now){
+  if(!validResetTime(ms)) return '';
+  const seconds = Math.max(0,Math.floor((now - ms)/1000));
+  return seconds < 60 ? seconds + 's ' + ui('ago','ago') : resetAgo(ms,now);
+}
+function resetCheckCountdown(ms,now){
+  if(!validResetTime(ms)) return ui('Waiting for schedule','Waiting for schedule');
+  const seconds = Math.max(0,Math.ceil((ms - now)/1000));
+  if(!seconds) return ui('Check due','Check due');
+  const mins = Math.floor(seconds/60);
+  return ui('Next check','Next check') + ' ' + mins + ':' + String(seconds%60).padStart(2,'0');
+}
+function publicResetIsLive(state,now){
+  const checked = state.checked_at || state.fetched_at;
+  const sourceExpired = validResetTime(state.source_expires_at) && state.source_expires_at <= now;
+  return state.status === 'ok' && !state.cached && !(state.feed && state.feed.stale) && !sourceExpired
+    && validResetTime(checked) && checked <= now+5000 && now-checked <= 90000;
 }
 function resetCountdown(ms, now){
   if(!validResetTime(ms)) return ui('Time unknown', 'Time unknown');
@@ -1851,12 +2156,42 @@ function renderPersonalResets(now){
   const freshness = fresh ? '' : windows.length ? ui('Last known reading. ', 'Last known reading. ') : '';
   resetNode('reset-personal-note').textContent = freshness + reading
     + ui('Personal windows renew on your own schedule.', 'Personal windows renew on your own schedule.');
+  const profile = typeof activeProfileFor === 'function' ? activeProfileFor('codex') : null;
+  resetNode('reset-personal-profile').textContent = profile ? String(profile.label || 'Account').slice(0,60) : ui('Personal','Personal');
+}
+function renderBankedReset(state){
+  const event = state.banked;
+  const bankedState = event && !event.preview ? event.banked_state || 'unknown' : 'unknown';
+  const labels = {announced:'Announced',arriving:'Arriving',available:'Source reports available',unknown:'Unconfirmed'};
+  resetNode('reset-banked-state').textContent = ui(labels[bankedState] || 'Unconfirmed',labels[bankedState] || 'Unconfirmed');
+  resetNode('reset-banked-summary').textContent = event && typeof event.summary === 'string' ? event.summary.slice(0,320)
+    : ui('No banked-reset announcement loaded yet.','No banked-reset announcement loaded yet.');
+  const timing = event && validResetTime(event.announced_at) ? resetDate(event.announced_at) + '. ' : '';
+  resetNode('reset-banked-detail').textContent = timing + ui('Latest public source status. This is not your own banked-credit balance; verify availability in your account.',
+    'Latest public source status. This is not your own banked-credit balance; verify availability in your account.');
+}
+function renderResetServices(state){
+  const holder = resetNode('reset-services'); holder.replaceChildren();
+  const service = state.service;
+  if(!service){appendResetText(holder,'span','reset-service',ui('Service status unavailable','Service status unavailable'));return;}
+  const surfaces = Array.isArray(service.surfaces) && service.surfaces.length ? service.surfaces.slice(0,5)
+    : [{label:'OpenAI services',status:service.status}];
+  for(const surface of surfaces){
+    const status = String(surface.status || 'unknown').toLowerCase();
+    const chip = appendResetText(holder,'span','reset-service',String(surface.label || 'Service').slice(0,60) + ' · ' + status.replaceAll('_',' '));
+    chip.dataset.status = service.stale ? 'stale' : status === 'operational' ? 'operational' : status === 'unknown' ? 'unknown' : 'degraded';
+    chip.title = service.stale ? 'Last known service status' : service.description || '';
+  }
 }
 function renderResetTracker(){
   const now = Date.now(), state = globalResetState || {}, latest = state.last_reset && validResetTime(state.last_reset.announced_at) ? state.last_reset : null, forecast = state.forecast;
   const feed = resetNode('reset-feed');
-  const status = globalResetBusy || state.refreshing ? 'loading' : state.status || 'loading';
-  const statusText = { ok:'Live feed', stale:'Saved feed', offline:'Feed offline', loading:'Checking…' }[status] || 'Feed unavailable';
+  const live = publicResetIsLive(state,now);
+  const checking = globalResetBusy || state.refreshing;
+  const sourceDelayed = state.status === 'ok' && ((state.feed && state.feed.stale) || (validResetTime(state.source_expires_at) && state.source_expires_at<=now));
+  const status = live ? 'ok' : checking ? 'loading' : state.status === 'ok' ? 'stale' : state.status || 'loading';
+  const statusText = live ? checking ? 'LIVE · syncing' : 'LIVE' : sourceDelayed ? 'Source delayed'
+    : { stale:'Saved feed', offline:'Feed offline', loading:'Checking…' }[status] || 'Feed unavailable';
   feed.textContent = ui(statusText, statusText); feed.dataset.status = status;
   resetNode('reset-latest-title').textContent = latest ? ui('Latest global reset', 'Latest global reset') : ui('Watching for resets', 'Watching for resets');
   resetNode('reset-latest-time').textContent = latest ? resetDate(latest.announced_at) + ' · ' + resetAgo(latest.announced_at, now)
@@ -1871,25 +2206,39 @@ function renderResetTracker(){
     + (forecast && forecast.confidence ? ' ' + ui('Confidence:', 'Confidence:') + ' ' + String(forecast.confidence) + '.' : '')
     + (forecast && forecast.confidence_note ? ' ' + String(forecast.confidence_note).slice(0, 240) : '');
   const history = resetNode('reset-history'); history.replaceChildren();
-  const events = Array.isArray(state.history) ? state.history.filter(e => e && validResetTime(e.announced_at)).slice(0, 4) : [];
+  const allEvents = Array.isArray(state.events) && state.events.length ? state.events : state.history || [];
+  const events = Array.isArray(allEvents) ? allEvents.filter(e => e && validResetTime(e.announced_at)
+    && (resetHistoryFilter === 'all' || e.kind === resetHistoryFilter || (!e.kind && resetHistoryFilter === 'reset'))).slice(0,8) : [];
   for(const event of events){
     const item = document.createElement('li');
+    if(event.kind){
+      const head = appendResetText(item,'div','reset-event-head','');
+      const kind = appendResetText(head,'span','reset-event-kind',String(event.kind).slice(0,20)); kind.dataset.kind = event.kind;
+      appendResetText(head,'span','',event.preview ? 'Preview' : event.banked_state ? String(event.banked_state).replaceAll('_',' ') : event.confirmed ? 'Confirmed' : 'Source update');
+    }
     appendResetText(item, 'p', '', event.summary ? String(event.summary).slice(0, 400) : ui('Global reset confirmed', 'Global reset confirmed'));
     const time = appendResetText(item, 'time', '', resetDate(event.announced_at));
     time.dateTime = new Date(event.announced_at).toISOString();
     history.appendChild(item);
   }
-  if(!events.length) appendResetText(history, 'li', '', ui('History will appear after the first successful check.', 'History will appear after the first successful check.'));
-  resetNode('reset-updated').textContent = state.fetched_at
-    ? ui('Checked', 'Checked') + ' ' + resetAgo(state.fetched_at, now)
+  if(!events.length) appendResetText(history, 'li', '', ui(resetHistoryFilter === 'all' ? 'History will appear after the first successful check.' : 'No announcements in this category.',resetHistoryFilter === 'all' ? 'History will appear after the first successful check.' : 'No announcements in this category.'));
+  const checked = state.checked_at || state.fetched_at;
+  resetNode('reset-updated').textContent = checked
+    ? ui('Checked', 'Checked') + ' ' + resetCheckAgo(checked, now)
     : ui('Waiting for first check', 'Waiting for first check');
+  resetNode('reset-next-check').textContent = checking ? ui('Checking now…','Checking now…') : resetCheckCountdown(state.next_check_at,now);
+  const sourceTime = state.source_checked_at || (state.feed && (state.feed.source_checked_at || state.feed.fetched_at));
+  resetNode('reset-source-age').textContent = (validResetTime(sourceTime) ? ui('Source as of','Source as of') + ' ' + resetDate(sourceTime) + '. ' : '')
+    + ui('Public source is checked every minute. Cached publications can arrive later than a new announcement.','Public source is checked every minute. Cached publications can arrive later than a new announcement.');
   const refresh = resetNode('btn-reset-refresh');
-  refresh.disabled = status === 'loading';
-  refresh.textContent = status === 'loading' ? ui('Checking…', 'Checking…') : ui('Refresh', 'Refresh');
+  refresh.disabled = !!checking;
+  refresh.textContent = checking ? ui('Checking…', 'Checking…') : ui('Refresh', 'Refresh');
   refresh.title = state.next_check_at > now ? ui('Next automatic check:', 'Next automatic check:') + ' ' + resetDate(state.next_check_at) : '';
   const error = resetNode('reset-error'); error.hidden = !state.error;
   error.textContent = state.error ? ui('Could not update the feed. ', 'Could not update the feed. ') + String(state.error).slice(0, 240) : '';
   drawSwitch(resetNode('sw-global-reset'), { value:state.notifications === true, busy:globalResetBusy || typeof state.notifications !== 'boolean' });
+  drawSwitch(resetNode('sw-banked-reset'), {value:state.banked_notifications===true,busy:globalResetBusy || typeof state.banked_notifications!=='boolean'});
+  renderBankedReset(state); renderResetServices(state);
   renderPersonalResets(now);
 }
 async function refreshResetTracker(){
@@ -1906,14 +2255,16 @@ async function refreshCodexResets(){
   try { const state = await invoke('get_codex'); if(revision === codexResetRevision && state){ codexResetState = state; renderResetTracker(); } }
   catch(e) { /* Public reset feed still works without a personal account reading. */ }
 }
-resetNode('btn-reset-refresh').addEventListener('click', async () => {
-  if(globalResetBusy) return;
+async function requestGlobalResetRefresh(silent){
+  if(globalResetBusy || (globalResetState && globalResetState.refreshing) || Date.now()-lastGlobalResetRequest<1000) return;
+  lastGlobalResetRequest=Date.now();
   globalResetBusy = true; renderResetTracker();
   const revision = globalResetRevision;
   try { const state = await invoke('refresh_global_resets'); if(revision === globalResetRevision && state && typeof state === 'object') globalResetState = state; }
-  catch(e) { strip('Reset feed refresh failed: ' + errText(e)); }
+  catch(e) { if(!silent) strip('Reset feed refresh failed: ' + errText(e)); }
   finally { globalResetBusy = false; renderResetTracker(); }
-});
+}
+resetNode('btn-reset-refresh').addEventListener('click',() => requestGlobalResetRefresh(false));
 resetNode('sw-global-reset').addEventListener('click', async () => {
   if(globalResetBusy || !globalResetState || typeof globalResetState.notifications !== 'boolean') return;
   const want = !globalResetState.notifications;
@@ -1927,8 +2278,31 @@ resetNode('sw-global-reset').addEventListener('click', async () => {
   catch(e) { strip('Global reset notifications could not be changed: ' + errText(e)); }
   finally { globalResetBusy = false; renderResetTracker(); }
 });
+resetNode('sw-banked-reset').addEventListener('click',async () => {
+  if(globalResetBusy || !globalResetState || typeof globalResetState.banked_notifications !== 'boolean') return;
+  const want=!globalResetState.banked_notifications; globalResetBusy=true; renderResetTracker();
+  try {
+    const on=await invoke('set_banked_reset_notifications',{on:want});
+    if(typeof on==='boolean' && globalResetState)globalResetState={...globalResetState,banked_notifications:on};
+    await refreshResetTracker(); if(globalResetState && globalResetState.banked_notifications===want)toast();
+  } catch(e){strip('Banked notifications could not be changed: '+errText(e));}
+  finally {globalResetBusy=false;renderResetTracker();}
+});
 resetNode('btn-reset-source').addEventListener('click', () => {
   invoke('open_global_reset_source').catch(e => strip('Source could not be opened: ' + errText(e)));
+});
+resetNode('btn-banked-reset-preview').addEventListener('click',async e => {
+  const button=e.currentTarget;button.disabled=true;
+  try{await invoke('preview_banked_reset_alert');}catch(err){strip('Banked preview failed: '+errText(err));}
+  finally{button.disabled=false;}
+});
+resetNode('reset-history-filter').addEventListener('click',e => {
+  const button=e.target.closest('[data-kind]');if(!button || !['all','reset','banked','boost'].includes(button.dataset.kind))return;
+  resetHistoryFilter=button.dataset.kind;
+  for(const child of resetNode('reset-history-filter').querySelectorAll('button')){
+    const on=child.dataset.kind===resetHistoryFilter;child.classList.toggle('on',on);child.setAttribute('aria-pressed',String(on));
+  }
+  renderResetTracker();
 });
 resetNode('btn-global-reset-preview').addEventListener('click', async e => {
   const button = e.currentTarget; button.disabled = true;
@@ -1944,7 +2318,11 @@ try {
     if(e.payload){ codexResetRevision++; codexResetState = e.payload; renderResetTracker(); }
   })).catch(() => {});
 } catch(e) { /* State is also asked for when the window opens or gets focus. */ }
-setInterval(() => { if(curTab === 'resets') renderResetTracker(); }, 30000);
+setInterval(() => {
+  if(curTab !== 'resets')return;
+  renderResetTracker();
+  if(globalResetState && !globalResetState.refreshing && validResetTime(globalResetState.next_check_at) && globalResetState.next_check_at<=Date.now())requestGlobalResetRefresh(true);
+},1000);
 
 /* ---- updates --------------------------------------------------------------
    Never a dialogue and never a badge: an update the user has not asked about is
@@ -1985,6 +2363,7 @@ Promise.resolve(updateListener).catch(() => {}).then(() =>
 /* ---- start ---------------------------------------------------------------- */
 function renderAll(){
   renderAccounts();
+  renderAccountProfiles();
   renderFlags();
   renderSize();
   renderEdge();
@@ -2008,6 +2387,7 @@ function boot(){
     loadLook(),
     refreshResetTracker(),
     refreshCodexResets(),
+    refreshAccountProfiles(),
     refreshOptions(),
     call('get_notch_slots', undefined, []).then(v => {
       notchSlots = Array.isArray(v) ? v.filter(x => x && typeof x.provider === 'string').map(x => ({ provider:x.provider })) : [];
@@ -2054,6 +2434,8 @@ window.addEventListener('focus', () => {
   refreshOptions();
   refreshResetTracker();
   refreshCodexResets();
+  refreshAccountProfiles();
+  if(curTab === 'resets')requestGlobalResetRefresh(true);
   // A screen can be plugged in, and the notch carried to another edge, while this window sits behind
   call('get_notch_edge', undefined, null).then(v => { if(typeof v === 'string') notchEdge = v; renderEdge(); });
   refreshScreens();

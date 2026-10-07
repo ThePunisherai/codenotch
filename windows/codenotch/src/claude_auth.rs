@@ -1,6 +1,8 @@
 //! User-initiated sign-in through the standalone Claude Code CLI. OAuth stays in
 //! the CLI: no codes, tokens, browser URLs or credential writes cross widget IPC.
 use serde::Serialize;
+use std::path::{Path, PathBuf};
+use tauri::{AppHandle, Emitter};
 use std::{process::{Child, Command}, sync::{atomic::{AtomicBool, Ordering}, Mutex}, time::{Duration, Instant}};
 
 static BUSY: AtomicBool = AtomicBool::new(false);
@@ -36,18 +38,18 @@ pub fn usage_succeeded() {
 
 // No interpolated shell input: even paths containing apostrophes arrive in env.
 #[cfg(windows)]
-const LOGIN_SCRIPT: &str = "$Host.UI.RawUI.WindowTitle = 'Codenotch - Claude sign-in'; Write-Host 'Complete sign-in in your browser. Paste any code in this window.'; & $env:CODENOTCH_CLAUDE_CLI auth login --claudeai; $loginResult = $LASTEXITCODE; if ($loginResult -eq 0) { Write-Host 'Sign-in complete. Codenotch will refresh automatically.'; Start-Sleep -Seconds 2 } else { Write-Host 'Sign-in failed or cancelled. Retry from Codenotch.'; Start-Sleep -Seconds 8 }; exit $loginResult";
+const LOGIN_SCRIPT: &str = "$Host.UI.RawUI.WindowTitle = 'Codenotch - Claude sign-in'; Write-Host 'Complete sign-in in your browser. Paste any code in this window.'; & $env:CODENOTCH_CLAUDE_CLI auth login; $loginResult = $LASTEXITCODE; if ($loginResult -eq 0) { Write-Host 'Sign-in complete. Codenotch will refresh automatically.'; Start-Sleep -Seconds 2 } else { Write-Host 'Sign-in failed or cancelled. Retry from Codenotch.'; Start-Sleep -Seconds 8 }; exit $loginResult";
 
 /// The same sign-in, driven by a POSIX shell inside a terminal window. The CLI path
 /// travels in the environment here too, so a path with quotes in it is never parsed.
 #[cfg(not(windows))]
-const LOGIN_SH: &str = "echo 'Complete sign-in in your browser. Paste any code in this window.'; \"$CODENOTCH_CLAUDE_CLI\" auth login --claudeai; r=$?; if [ $r -eq 0 ]; then echo 'Sign-in complete. Codenotch will refresh automatically.'; sleep 2; else echo 'Sign-in failed or cancelled. Retry from Codenotch.'; sleep 8; fi; exit $r";
+const LOGIN_SH: &str = "echo 'Complete sign-in in your browser. Paste any code in this window.'; \"$CODENOTCH_CLAUDE_CLI\" auth login; r=$?; if [ $r -eq 0 ]; then echo 'Sign-in complete. Codenotch will refresh automatically.'; sleep 2; else echo 'Sign-in failed or cancelled. Retry from Codenotch.'; sleep 8; fi; exit $r";
 
 /// A terminal emulator that can run a command, in the order a desktop is likely to have one.
 /// `-e` is understood by all of these; the Debian alternative comes first so the user's own
 /// choice wins.
 #[cfg(not(windows))]
-fn terminal_emulator() -> Option<std::path::PathBuf> {
+pub(crate) fn terminal_emulator() -> Option<std::path::PathBuf> {
     const CANDIDATES: [&str; 8] = [
         "x-terminal-emulator",
         "gnome-terminal",
@@ -71,7 +73,7 @@ fn terminal_emulator() -> Option<std::path::PathBuf> {
 }
 
 #[cfg(not(windows))]
-fn login_command(cli: &std::path::Path) -> Result<Command, String> {
+fn login_command(cli: &std::path::Path, profile_root: &Path) -> Result<Command, String> {
     let term = terminal_emulator().ok_or("No terminal emulator found. Run `claude auth login` yourself.")?;
     let mut cmd = Command::new(term);
     cmd.args(["-e", "sh", "-c", LOGIN_SH]).env("CODENOTCH_CLAUDE_CLI", cli);
@@ -79,15 +81,17 @@ fn login_command(cli: &std::path::Path) -> Result<Command, String> {
     for (key, _) in std::env::vars_os() {
         let k = key.to_string_lossy();
         if k == "CLAUDECODE" || k.starts_with("CLAUDE_CODE_")
-            || matches!(k.as_ref(), "CLAUDE_CONFIG_DIR" | "ANTHROPIC_API_KEY" | "ANTHROPIC_AUTH_TOKEN") {
+            || matches!(k.as_ref(), "CLAUDE_CONFIG_DIR" | "ANTHROPIC_API_KEY" | "ANTHROPIC_AUTH_TOKEN" | "CLAUDE_CODE_OAUTH_TOKEN") {
             cmd.env_remove(&key);
         }
     }
+    cmd.env("CLAUDE_CONFIG_DIR", profile_root)
+        .env_remove("ANTHROPIC_API_KEY").env_remove("ANTHROPIC_AUTH_TOKEN").env_remove("CLAUDE_CODE_OAUTH_TOKEN");
     Ok(cmd)
 }
 
 #[cfg(windows)]
-fn login_command(cli: &std::path::Path) -> Result<Command, String> {
+fn login_command(cli: &std::path::Path, profile_root: &Path) -> Result<Command, String> {
     let root = std::env::var_os("SystemRoot").ok_or("Windows directory unavailable.")?;
     let mut cmd = Command::new(std::path::PathBuf::from(root).join("System32/WindowsPowerShell/v1.0/powershell.exe"));
     cmd.args(["-NoLogo", "-NoProfile", "-Command", LOGIN_SCRIPT]).env("CODENOTCH_CLAUDE_CLI", cli);
@@ -97,7 +101,7 @@ fn login_command(cli: &std::path::Path) -> Result<Command, String> {
     for (key, _) in std::env::vars_os() {
         let k = key.to_string_lossy();
         if k == "CLAUDECODE" || k.starts_with("CLAUDE_CODE_")
-            || matches!(k.as_ref(), "CLAUDE_CONFIG_DIR" | "ANTHROPIC_API_KEY" | "ANTHROPIC_AUTH_TOKEN") {
+            || matches!(k.as_ref(), "CLAUDE_CONFIG_DIR" | "ANTHROPIC_API_KEY" | "ANTHROPIC_AUTH_TOKEN" | "CLAUDE_CODE_OAUTH_TOKEN") {
             cmd.env_remove(&key);
         }
     }
@@ -105,10 +109,12 @@ fn login_command(cli: &std::path::Path) -> Result<Command, String> {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0000_0010); // visible console only after a user's click
     }
+    cmd.env("CLAUDE_CONFIG_DIR", profile_root)
+        .env_remove("ANTHROPIC_API_KEY").env_remove("ANTHROPIC_AUTH_TOKEN").env_remove("CLAUDE_CODE_OAUTH_TOKEN");
     Ok(cmd)
 }
 
-fn terminate(child: &mut Child) {
+pub(crate) fn terminate(child: &mut Child) {
     #[cfg(windows)] {
         use std::os::windows::process::CommandExt;
         use std::process::Stdio;
@@ -123,7 +129,7 @@ fn terminate(child: &mut Child) {
     let _ = child.wait();
 }
 
-fn wait_child(child: &mut Child, timeout: Duration) -> bool {
+pub(crate) fn wait_child(child: &mut Child, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait() {
@@ -137,7 +143,10 @@ fn wait_child(child: &mut Child, timeout: Duration) -> bool {
 pub fn start_login() -> Result<(), String> {
     let cli = crate::usage::find_cli().ok_or("Claude Code CLI not found. Install the standalone CLI first.")?;
     let guard = try_acquire().ok_or("Claude sign-in or renewal is already running.")?;
-    let mut cmd = login_command(&cli)?;
+    let root = crate::accounts::active("claude").map(|p| p.root)
+        .or_else(|| std::env::var_os("CLAUDE_CONFIG_DIR").filter(|p| !p.is_empty()).map(PathBuf::from))
+        .or_else(|| dirs::home_dir().map(|h| h.join(".claude"))).ok_or("Home directory unavailable.")?;
+    let mut cmd = login_command(&cli, &root)?;
     let mut child = cmd.spawn().map_err(|_| "Unable to open Claude sign-in window.")?;
     *message() = "Complete sign-in in the browser or terminal window.".into();
     std::thread::spawn(move || {
@@ -149,6 +158,39 @@ pub fn start_login() -> Result<(), String> {
         crate::usage::request_refresh();
     });
     Ok(())
+}
+
+/// Sign in to one isolated account. The standalone CLI writes its own credential;
+/// only a busy flag and human-readable result are sent to the settings window.
+pub fn login_profile(app: &AppHandle, profile_id: &str, root: PathBuf) -> Result<(), String> {
+    let cli = crate::usage::find_cli().ok_or("Claude Code CLI not found. Install the standalone CLI first.")?;
+    std::fs::create_dir_all(&root).map_err(|_| "Unable to create the account directory.")?;
+    let guard = try_acquire().ok_or("Claude sign-in or renewal is already running.")?;
+    let mut cmd = login_command(&cli, &root)?;
+    let mut child = cmd.spawn().map_err(|_| "Unable to open Claude sign-in window.")?;
+    let app = app.clone();
+    let profile_id = profile_id.to_owned();
+    *message() = "Complete sign-in in the browser or terminal window.".into();
+    emit_profile_login(&app, "claude", &profile_id, true, &message());
+    std::thread::spawn(move || {
+        let ok = wait_child(&mut child, Duration::from_secs(15 * 60));
+        let signed_in = ok && crate::usage::profile_has_credential(&root);
+        let note = if signed_in { "Sign-in complete. Refreshing usage..." } else {
+            "Sign-in cancelled, failed or timed out. Try again."
+        };
+        *message() = note.into();
+        drop(guard);
+        if signed_in { crate::accounts::login_finished(&app, "claude", &profile_id); }
+        emit_profile_login(&app, "claude", &profile_id, false, note);
+        crate::usage::request_refresh();
+    });
+    Ok(())
+}
+
+pub(crate) fn emit_profile_login(app: &AppHandle, provider: &str, profile_id: &str, busy: bool, note: &str) {
+    let _ = app.emit("provider-account-login", serde_json::json!({
+        "provider": provider, "profile_id": profile_id, "busy": busy, "note": note
+    }));
 }
 
 #[cfg(test)]
@@ -167,7 +209,9 @@ mod tests {
     #[cfg(windows)]
     fn paths_are_data_not_shell_source() {
         let path = std::path::Path::new(r"C:\fixture with spaces\O'Brien\claude.cmd");
-        let cmd = login_command(path).unwrap();
+        let profile = std::path::Path::new(r"C:\fixture with spaces\Claude profile");
+        let cmd = login_command(path, profile).unwrap();
+        assert!(cmd.get_envs().any(|(k,v)| k == "CLAUDE_CONFIG_DIR" && v == Some(profile.as_os_str())));
         assert!(cmd.get_args().all(|arg| !arg.to_string_lossy().contains("O'Brien")));
         assert!(cmd.get_envs().any(|(k,v)| k == "CODENOTCH_CLAUDE_CLI" && v == Some(path.as_os_str())));
     }

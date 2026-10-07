@@ -3,10 +3,9 @@
 //! Headers: Authorization: Bearer <token>; anthropic-beta: oauth-2025-04-20; 15 s timeout
 //! Rules (upstream's discipline):
 //!   - the credential comes from Claude Code's own store (Windows: ~/.claude/.credentials.json), read only
-//!   - accounts, plural: ~/.claude and every ~/.claude-<slug> holding a credential. That layout is not invented
-//!     here — it is what CLAUDE_CONFIG_DIR points a shell at, and what the Mac app already reads several accounts
-//!     by. Each account's windows carry its name in `group`, so the card stacks them exactly as Antigravity's
-//!     model families stack, and a machine with one account produces byte-for-byte the old reading
+//!   - Settings selects one native profile. Its CLAUDE_CONFIG_DIR, credential, usage cache,
+//!     renewal and reset deadlines stay together. Local .claude-* directories remain discoverable
+//!     and observable for activity, but never merge another account's freshness into the selected quota.
 //!   - 401 → re-read the credential once and retry (Claude Code may have just refreshed the token) → still
 //!     failing means needsAuth; 403 is access denied, not proof of lost authentication
 //!   - 429 → back off 60 s × 2^n capped at 15 min, Retry-After only raises it, even past the cap; the deadline is persisted
@@ -29,7 +28,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 const ENDPOINT: &str = "https://api.anthropic.com/api/oauth/usage";
 const POLL_ACTIVE_SECS: u64 = 60;
-const POLL_IDLE_SECS: u64 = 300;
+const POLL_IDLE_SECS: u64 = 60;
 const BACKOFF_BASE_SECS: u64 = 60;
 const BACKOFF_CAP_SECS: u64 = 900;
 /// Renew when this close to expiry. Must stay under Claude Code's own five minutes: its start-up renews the token
@@ -56,6 +55,13 @@ fn sleep_interruptible(total_secs: u64) {
         }
         std::thread::sleep(Duration::from_secs(1));
     }
+}
+
+/// The server supplies absolute reset deadlines, so wake at the earliest one
+/// rather than delaying a reset confirmation until the next regular poll.
+pub(crate) fn refresh_delay_secs(windows: &[LimitWindow], now: u64, base: u64) -> u64 {
+    windows.iter().filter_map(|w| w.resets_at).filter(|r| *r > now)
+        .map(|r| ((r - now) / 1000).max(1)).min().unwrap_or(base).min(base).max(1)
 }
 
 fn now_ms() -> u64 {
@@ -97,11 +103,13 @@ fn has_credential(dir: &Path) -> bool {
 /// Every account on the machine: the default first, then ~/.claude-<slug> in name order. A secondary
 /// directory counts only once it holds a credential, so a half-made one never shows up on the card as
 /// an account waiting to be signed in.
-fn profiles() -> Vec<Profile> {
+fn discovered_profiles() -> Vec<Profile> {
     let Some(home) = dirs::home_dir() else {
         return Vec::new();
     };
-    let mut out = vec![Profile { dir: home.join(".claude"), slug: None }];
+    let default_dir = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|p| !p.is_empty())
+        .map(PathBuf::from).unwrap_or_else(|| home.join(".claude"));
+    let mut out = vec![Profile { dir: default_dir, slug: None }];
     let mut extra: Vec<Profile> = Vec::new();
     if let Ok(rd) = std::fs::read_dir(&home) {
         for e in rd.flatten() {
@@ -117,13 +125,27 @@ fn profiles() -> Vec<Profile> {
         }
     }
     extra.sort_by(|a, b| a.slug.cmp(&b.slug));
+    extra.retain(|p| p.dir != out[0].dir);
     out.append(&mut extra);
     out
 }
 
-/// Every account directory, for anything that watches a profile's files (the session watcher)
+/// Only the selected account contributes quota. Automatic discovery belongs in Settings,
+/// where a user can distinguish accounts before choosing whose reset to track.
+fn profiles() -> Vec<Profile> {
+    match crate::accounts::active("claude") {
+        Some(p) => vec![Profile { dir: p.root, slug: None }],
+        None => discovered_profiles().into_iter().take(1).collect(),
+    }
+}
+
+/// Activity watchers still observe local Claude session directories.
 pub fn profile_dirs() -> Vec<PathBuf> {
-    profiles().into_iter().map(|p| p.dir).collect()
+    let mut dirs: Vec<PathBuf> = discovered_profiles().into_iter().map(|p| p.dir).collect();
+    for p in profiles() {
+        if !dirs.contains(&p.dir) { dirs.push(p.dir); }
+    }
+    dirs
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -158,23 +180,35 @@ pub struct UsageSnapshot {
 }
 
 fn store_path() -> std::path::PathBuf {
-    crate::config::config_path().with_file_name("usage.json")
+    crate::accounts::cache_path("claude", "usage.json")
 }
 
 pub fn load_persisted() -> UsageSnapshot {
     std::fs::read_to_string(store_path())
         .ok()
         .and_then(|t| serde_json::from_str::<UsageSnapshot>(&t).ok())
+        .map(|mut snap| {
+            // Older versions merged ~/.claude-* into the default cache. Those rows cannot
+            // establish the selected account's freshness or trigger its reset notifications.
+            if snap.windows.iter().any(|w| w.id.contains('@')) {
+                snap.windows.retain(|w| !w.id.contains('@'));
+                snap.status = "stale".into();
+                snap.fetched_at = 0;
+                snap.note = "Refreshing the selected Claude account...".into();
+            }
+            snap
+        })
         // The status it was saved with is the status it comes back with: a reading persisted a
         // minute before a restart is a minute old, not stale, and `fetched_at` came back with it,
         // so whatever reads this can tell the difference on its own.
         .unwrap_or_default()
 }
 
-fn persist(s: &UsageSnapshot) {
-    if let Ok(t) = serde_json::to_string_pretty(s) {
-        let _ = std::fs::write(store_path(), t);
-    }
+fn persist(s: &UsageSnapshot) { persist_at(&store_path(), s); }
+
+fn persist_at(path: &Path, s: &UsageSnapshot) {
+    if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
+    if let Ok(t) = serde_json::to_string_pretty(s) { let _ = std::fs::write(path, t); }
 }
 
 #[derive(Default)]
@@ -218,6 +252,23 @@ fn read_credentials(dir: &Path) -> Option<Credential> {
 }
 
 /// For doctor: credential probe report (prints no secret values)
+pub fn profile_has_credential(root: &Path) -> bool { read_credentials(root).is_some() }
+
+/// The native global profile config carries email, while .credentials carries OAuth.
+/// Return a label only; never expose a token or a refresh secret over IPC.
+pub fn profile_identity(root: &Path) -> Option<String> {
+    let candidates = [root.join(".claude.json"), root.join("config.json"), root.with_extension("json")];
+    for path in candidates {
+        let Some(v) = std::fs::read_to_string(path).ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()) else { continue; };
+        if let Some(email) = v.pointer("/oauthAccount/emailAddress").or_else(|| v.get("email"))
+            .and_then(|s| s.as_str()).filter(|s| s.len() <= 254) {
+            return Some(email.to_owned());
+        }
+    }
+    None
+}
+
 pub fn probe_credentials() -> String {
     let cli = match find_cli() {
         Some(p) => format!("renews via {}", p.display()),
@@ -328,32 +379,49 @@ fn retry_wait_ms(failures: u32) -> u64 {
 
 /// `claude -p` with a null stdin starts up (which is where it renews an aged token), then exits non-zero for want
 /// of a prompt: no conversation, no transcript. Output goes nowhere — a token could in principle be echoed into it.
-fn run_renewal(cli: &std::path::Path, dir: &Path) -> std::io::Result<()> {
+fn renewal_command(cli: &Path, dir: &Path) -> std::process::Command {
     use std::process::{Command, Stdio};
-    let mut cmd = Command::new(cli);
-    cmd.arg("-p").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    #[cfg(windows)]
+    let mut cmd = if cli.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("cmd")) {
+        // A cmd shim cannot be CreateProcess'd directly. PowerShell invokes the path as data.
+        let root = std::env::var_os("SystemRoot").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+        let mut command = Command::new(root.join("System32/WindowsPowerShell/v1.0/powershell.exe"));
+        command.args(["-NoLogo", "-NoProfile", "-Command", "& $env:CODENOTCH_CLAUDE_CLI -p; exit $LASTEXITCODE"])
+            .env("CODENOTCH_CLAUDE_CLI", cli);
+        command
+    } else { let mut command = Command::new(cli); command.arg("-p"); command };
+    #[cfg(not(windows))]
+    let mut cmd = { let mut command = Command::new(cli); command.arg("-p"); command };
+    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     // Launched from inside a Claude Code session, the child would take the host's auth and leave the file alone
     for (k, _) in std::env::vars_os() {
         let k = k.to_string_lossy();
-        if k == "CLAUDECODE" || k.starts_with("CLAUDE_CODE_") {
+        if k == "CLAUDECODE" || k.starts_with("CLAUDE_CODE_")
+            || matches!(k.as_ref(), "ANTHROPIC_API_KEY" | "ANTHROPIC_AUTH_TOKEN" | "CLAUDE_CODE_OAUTH_TOKEN") {
             cmd.env_remove(k.as_ref());
         }
     }
     // Which account gets renewed is said here, never inherited: CLAUDE_CONFIG_DIR is not CLAUDE_CODE_*, so it
     // survives the loop above, and a Codenotch started from a shell pointed at another account used to renew
     // that one while the account on screen stayed expired.
-    cmd.env("CLAUDE_CONFIG_DIR", dir);
+    cmd.env("CLAUDE_CONFIG_DIR", dir)
+        .env_remove("ANTHROPIC_API_KEY").env_remove("ANTHROPIC_AUTH_TOKEN").env_remove("CLAUDE_CODE_OAUTH_TOKEN");
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
-    let mut child = cmd.spawn()?;
+    // Use a neutral profile directory, never a repository with unrelated project hooks.
+    cmd.current_dir(dir);
+    cmd
+}
+
+fn run_renewal(cli: &Path, dir: &Path) -> std::io::Result<()> {
+    let mut child = renewal_command(cli, dir).spawn()?;
     let deadline = std::time::Instant::now() + Duration::from_secs(RENEW_TIMEOUT_SECS);
     while child.try_wait()?.is_none() {
         if std::time::Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
+            crate::claude_auth::terminate(&mut child);
             break;
         }
         std::thread::sleep(Duration::from_millis(100));
@@ -522,15 +590,13 @@ fn backoff_secs(consecutive: u32, retry_after_floor: u64) -> u64 {
     exp.clamp(BACKOFF_BASE_SECS, BACKOFF_CAP_SECS).max(retry_after_floor)
 }
 
-fn set_and_broadcast(app: &AppHandle, mutate: impl FnOnce(&mut UsageSnapshot)) {
-    let st = app.state::<AppState>();
-    let snap = {
-        let mut u = st.usage.lock().unwrap();
-        mutate(&mut u);
-        u.clone()
-    };
-    persist(&snap);
-    let _ = app.emit("usage", &snap);
+fn set_and_broadcast(app: &AppHandle, selection: &str, snap: UsageSnapshot) -> bool {
+    crate::accounts::with_selection("claude", selection, || {
+        let st = app.state::<AppState>();
+        *st.usage.lock().unwrap() = snap.clone();
+        persist(&snap);
+        let _ = app.emit("usage", &snap);
+    }).is_some()
 }
 
 /// What one account contributes to the shared reading. Kept across ticks so a refresh that fails for
@@ -693,57 +759,47 @@ fn poll_account(p: &Profile, acc: &mut Account, group: Option<&str>) {
 
 pub fn start(app: AppHandle) {
     std::thread::spawn(move || {
-        // Broadcast the persisted old reading at startup (stale beats blank)
-        let persisted = {
-            let st = app.state::<AppState>();
-            let snap = st.usage.lock().unwrap().clone();
-            let _ = app.emit("usage", &snap);
-            snap
-        };
+        let mut selection = String::new();
         let mut accounts: HashMap<String, Account> = HashMap::new();
-        for (k, windows) in split_persisted(&persisted, &profiles()) {
-            accounts.entry(k).or_default().windows = windows;
-        }
         loop {
-            // A sign-in the user started owns the credential until it finishes. Polling through it
-            // reads a file being rewritten and reports a signed-out account mid-login.
-            if crate::claude_auth::state().busy {
-                sleep_interruptible(2);
-                continue;
+            let current = crate::accounts::selection_key("claude");
+            let Some((order, cache, previous)) = crate::accounts::with_selection("claude", &current,
+                || (profiles(), store_path(), load_persisted())) else { continue; };
+            if current != selection {
+                selection = current;
+                accounts.clear();
+                for p in &order {
+                    accounts.insert(key(p), Account {
+                        windows: previous.windows.clone(), status: previous.status.clone(),
+                        note: previous.note.clone(), fetched_at: previous.fetched_at,
+                        backoff_until: previous.backoff_until, ..Default::default()
+                    });
+                }
+                set_and_broadcast(&app, &selection, previous);
             }
-            // Re-read the list each tick: an account signed into or removed while this runs needs no restart
-            let order = profiles();
-            let multi = order.len() > 1;
+            if crate::claude_auth::state().busy { sleep_interruptible(1); continue; }
             for p in &order {
-                let group = if multi {
-                    Some(p.group(read_credentials(&p.dir).and_then(|c| c.plan).as_deref()))
-                } else {
-                    None
-                };
                 let acc = accounts.entry(key(p)).or_default();
-                poll_account(p, acc, group.as_deref());
+                poll_account(p, acc, None);
             }
-            accounts.retain(|k, _| order.iter().any(|p| key(p) == *k));
             let snap = aggregate(&order, &accounts);
             let backoff_until = snap.backoff_until;
-            set_and_broadcast(&app, |u| *u = snap);
-            // 60 s while a session is active, 300 s otherwise (upstream throttling discipline)
-            let active = {
-                let st = app.state::<AppState>();
-                let store = st.store.lock().unwrap();
-                let s = store.snapshot("en", "en", false, false);
-                !s.sessions.is_empty()
-            };
-            let base = if active { POLL_ACTIVE_SECS } else { POLL_IDLE_SECS };
-            // A back-off deadline sooner than the next tick is what we wake for, as the single-account
-            // loop did when it slept the window out in slices
+            let next_reset = refresh_delay_secs(&snap.windows, now_ms(), POLL_ACTIVE_SECS.min(POLL_IDLE_SECS));
+            // A late result cannot restore quota after a re-login. Preserve only a
+            // server Retry-After for the captured account, under the mutation gate.
+            if !set_and_broadcast(&app, &selection, snap) && backoff_until > now_ms() {
+                crate::accounts::preserve_backoff(&cache, backoff_until);
+            }
             let now = now_ms();
+            let base = next_reset;
             let secs = if backoff_until > now {
                 ((backoff_until - now) / 1000).clamp(1, base.min(30))
-            } else {
-                base
-            };
-            sleep_interruptible(secs);
+            } else { base };
+            for _ in 0..secs {
+                if REFRESH.swap(false, std::sync::atomic::Ordering::Relaxed)
+                    || crate::accounts::selection_key("claude") != selection { break; }
+                std::thread::sleep(Duration::from_secs(1));
+            }
         }
     });
 }
@@ -751,6 +807,46 @@ pub fn start(app: AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_reset_deadline_interrupts_the_normal_refresh_period() {
+        let window = LimitWindow { resets_at: Some(109_500), ..Default::default() };
+        assert_eq!(refresh_delay_secs(&[window.clone()], 100_000, 60), 9);
+        assert_eq!(refresh_delay_secs(&[window.clone()], 109_499, 60), 1);
+        assert_eq!(refresh_delay_secs(&[window], 110_000, 60), 60);
+        assert_eq!(refresh_delay_secs(&[], 100_000, 60), 60);
+    }
+
+    #[test]
+    fn credentials_and_identity_stay_inside_the_requested_profile() {
+        let root = std::env::temp_dir().join(format!("codenotch-claude-accounts-{}-{}", std::process::id(), now_ms()));
+        let a = root.join("a");
+        let b = root.join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(a.join(".credentials.json"), r#"{"claudeAiOauth":{"accessToken":"fixture-a","subscriptionType":"pro"}}"#).unwrap();
+        std::fs::write(b.join("credentials.json"), r#"{"claudeAiOauth":{"accessToken":"fixture-b","subscriptionType":"max"}}"#).unwrap();
+        std::fs::write(b.join(".claude.json"), r#"{"oauthAccount":{"emailAddress":"work@example.test"}}"#).unwrap();
+        assert_eq!(read_credentials(&a).unwrap().plan.as_deref(), Some("pro"));
+        assert_eq!(read_credentials(&b).unwrap().plan.as_deref(), Some("max"));
+        assert_eq!(profile_identity(&b).as_deref(), Some("work@example.test"));
+        assert!(read_credentials(&root.join("missing")).is_none());
+        assert!(profile_identity(&a).is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn renewal_targets_the_profile_and_does_not_accept_inherited_api_auth() {
+        let root = Path::new(r"C:\profiles with spaces\work");
+        let cmd = renewal_command(Path::new("claude.exe"), root);
+        assert_eq!(cmd.get_current_dir(), Some(root));
+        assert!(cmd.get_envs().any(|(k, v)| k == "CLAUDE_CONFIG_DIR" && v == Some(root.as_os_str())));
+        assert!(cmd.get_envs().any(|(k, v)| k == "ANTHROPIC_API_KEY" && v.is_none()));
+        assert!(cmd.get_envs().any(|(k, v)| k == "ANTHROPIC_AUTH_TOKEN" && v.is_none()));
+        assert!(cmd.get_envs().any(|(k, v)| k == "CLAUDE_CODE_OAUTH_TOKEN" && v.is_none()));
+        // Secrets are passed neither as CLI arguments nor as Codenotch configuration.
+        assert!(cmd.get_args().all(|a| !a.to_string_lossy().contains("profiles with spaces")));
+    }
 
     const EXP: u64 = 1_000_000_000;
 
@@ -895,7 +991,7 @@ mod tests {
     #[test]
     fn the_default_account_is_first_and_always_listed() {
         // Discovery reads the real home, so this asserts only what holds on any machine
-        let list = profiles();
+        let list = discovered_profiles();
         assert!(!list.is_empty(), "the default account is listed even with no credential");
         assert_eq!(list[0].slug, None, "and comes first, so it owns the notch");
         let slugs: Vec<Option<String>> = list.iter().skip(1).map(|p| p.slug.clone()).collect();

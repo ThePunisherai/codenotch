@@ -538,6 +538,9 @@ fn run_cmd_conpty(
 
 /// Executes official `agy --print /usage` via native ConPTY.
 pub fn read_quota() -> Result<Vec<LimitWindow>, String> {
+    if crate::accounts::active("antigravity").is_some() {
+        return Err("Saved Antigravity accounts use their imported login, not the shared CLI session".into());
+    }
     let agy = find_agy().ok_or("Antigravity CLI is not installed")?;
     let dir = crate::config::config_path().with_file_name("quota-work");
     std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot create CLI working directory: {e}"))?;

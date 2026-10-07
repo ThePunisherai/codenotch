@@ -30,16 +30,20 @@ struct QueueState {
     dismissed: bool,
     active_token: u64,
     active_global: bool,
+    active_banked: bool,
+    active_provider: Option<String>,
 }
 
 enum AlertEvent {
     Personal(ResetEvent),
     Global(crate::global_reset::ConfirmedReset),
+    Banked(crate::global_reset::PublicEvent),
 }
 
 struct QueuedAlert {
     event: AlertEvent,
     preview: bool,
+    selection_key: Option<String>,
 }
 
 #[derive(Default)]
@@ -66,11 +70,16 @@ struct CardPayload {
     source_label: String,
 }
 
-pub fn enqueue(app: &AppHandle, event: ResetEvent) {
+pub fn enqueue(app: &AppHandle, event: ResetEvent, selection: &str) {
     let state = app.state::<AppState>();
     let config = state.cfg.lock().unwrap();
     if config.reset_notifications {
-        enqueue_unchecked(app, AlertEvent::Personal(event), false);
+        enqueue_unchecked(
+            app,
+            AlertEvent::Personal(event),
+            false,
+            Some(selection.into()),
+        );
     }
 }
 
@@ -82,14 +91,35 @@ pub fn enqueue_global(app: &AppHandle, event: crate::global_reset::ConfirmedRese
         .unwrap()
         .global_reset_notifications;
     if enabled {
-        enqueue_unchecked(app, AlertEvent::Global(event), false);
+        enqueue_unchecked(app, AlertEvent::Global(event), false, None);
     }
 }
 
-fn enqueue_unchecked(app: &AppHandle, event: AlertEvent, preview: bool) {
+pub fn enqueue_banked(app: &AppHandle, event: crate::global_reset::PublicEvent) {
+    if app
+        .state::<AppState>()
+        .cfg
+        .lock()
+        .unwrap()
+        .banked_reset_notifications
+    {
+        enqueue_unchecked(app, AlertEvent::Banked(event), false, None);
+    }
+}
+
+fn enqueue_unchecked(
+    app: &AppHandle,
+    event: AlertEvent,
+    preview: bool,
+    selection_key: Option<String>,
+) {
     let queue = &app.state::<AppState>().reset_alerts;
     let mut state = queue.state.lock().unwrap();
-    state.pending.push_back(QueuedAlert { event, preview });
+    state.pending.push_back(QueuedAlert {
+        event,
+        preview,
+        selection_key,
+    });
     if state.running {
         return;
     }
@@ -106,20 +136,37 @@ fn run(app: AppHandle) {
             let Some(queued) = state.pending.pop_front() else {
                 state.running = false;
                 state.active_token = 0;
+                state.active_provider = None;
                 return;
             };
             state.active_token = state.active_token.wrapping_add(1).max(1);
             state.dismissed = false;
             state.active_global = matches!(&queued.event, AlertEvent::Global(_));
+            state.active_banked = matches!(&queued.event, AlertEvent::Banked(_));
+            state.active_provider = match &queued.event {
+                AlertEvent::Personal(event) => Some(event.provider.clone()),
+                _ => None,
+            };
             (queued, state.active_token)
         };
-        if let Err(err) = show(&app, queued.event, token, queued.preview) {
-            crate::applog(&format!("reset card: {err}"));
-            if queued.preview {
-                let _ = app.emit_to("settings", "reset_alert_preview_error", err);
+        match show(
+            &app,
+            queued.event,
+            token,
+            queued.preview,
+            queued.selection_key,
+        ) {
+            Ok(true) => {}
+            result => {
+                if let Err(err) = result {
+                    crate::applog(&format!("reset card: {err}"));
+                    if queued.preview {
+                        let _ = app.emit_to("settings", "reset_alert_preview_error", err);
+                    }
+                }
+                close(&app);
+                continue;
             }
-            close(&app);
-            continue;
         }
         let queue = &app.state::<AppState>().reset_alerts;
         let state = queue.state.lock().unwrap();
@@ -130,11 +177,26 @@ fn run(app: AppHandle) {
     }
 }
 
-fn show(app: &AppHandle, event: AlertEvent, token: u64, preview: bool) -> Result<(), String> {
+fn show(
+    app: &AppHandle,
+    event: AlertEvent,
+    token: u64,
+    preview: bool,
+    selection_key: Option<String>,
+) -> Result<bool, String> {
     let app_for_main = app.clone();
     let (sender, receiver) = mpsc::sync_channel(1);
     app.run_on_main_thread(move || {
-        let result = show_on_main(&app_for_main, event, token, preview);
+        let result =
+            if let (AlertEvent::Personal(personal), Some(selection)) = (&event, &selection_key) {
+                let provider = personal.provider.clone();
+                crate::accounts::with_selection(&provider, selection, || {
+                    show_on_main(&app_for_main, event, token, preview)
+                })
+                .unwrap_or(Ok(false))
+            } else {
+                show_on_main(&app_for_main, event, token, preview)
+            };
         let _ = sender.send(result);
     })
     .map_err(|e| e.to_string())?;
@@ -162,7 +224,18 @@ fn show_on_main(
     event: AlertEvent,
     token: u64,
     preview: bool,
-) -> Result<(), String> {
+) -> Result<bool, String> {
+    // A switch or disabled notification may dismiss this item before its main-thread task runs.
+    if app
+        .state::<AppState>()
+        .reset_alerts
+        .state
+        .lock()
+        .unwrap()
+        .dismissed
+    {
+        return Ok(false);
+    }
     let screen = crate::target_screen(app).ok_or("no display available")?;
     let (edge, cfg_scale, visible, lang) = {
         let st = app.state::<AppState>();
@@ -189,7 +262,7 @@ fn show_on_main(
 
     let provider = match &event {
         AlertEvent::Personal(event) => event.provider.as_str(),
-        AlertEvent::Global(_) => "codex",
+        AlertEvent::Global(_) | AlertEvent::Banked(_) => "codex",
     };
     let glyph = app
         .state::<AppState>()
@@ -241,6 +314,33 @@ fn show_on_main(
                 "No reset event reported"
             } else {
                 "Check your account usage"
+            }
+            .into(),
+            format!("Source: {}", crate::global_reset::SOURCE_NAME),
+            event
+                .url
+                .unwrap_or_else(|| crate::global_reset::SOURCE_URL.into()),
+            "View reset source".into(),
+        ),
+        AlertEvent::Banked(event) => (
+            "banked_reset",
+            "global",
+            if preview {
+                "Banked notification preview"
+            } else {
+                match event.banked_state.as_deref() {
+                    Some("available") => "Banked reset available",
+                    Some("arriving") => "Banked reset arriving",
+                    Some("announced") => "Banked reset announced",
+                    _ => "Banked reset update",
+                }
+            }
+            .into(),
+            "Codex / ChatGPT Work · public update".into(),
+            if preview {
+                "No banked grant reported"
+            } else {
+                "Check availability in your account"
             }
             .into(),
             format!("Source: {}", crate::global_reset::SOURCE_NAME),
@@ -366,7 +466,7 @@ fn show_on_main(
     if sound_on {
         play_notification_sound();
     }
-    Ok(())
+    Ok(true)
 }
 
 #[cfg(windows)]
@@ -437,8 +537,8 @@ pub fn disable(app: &AppHandle) {
     let mut state = queue.state.lock().unwrap();
     state
         .pending
-        .retain(|queued| matches!(&queued.event, AlertEvent::Global(_)));
-    if !state.active_global {
+        .retain(|queued| !matches!(&queued.event, AlertEvent::Personal(_)));
+    if !state.active_global && !state.active_banked {
         state.dismissed = true;
         queue.changed.notify_all();
     }
@@ -449,8 +549,36 @@ pub fn disable_global(app: &AppHandle) {
     let mut state = queue.state.lock().unwrap();
     state
         .pending
-        .retain(|queued| matches!(&queued.event, AlertEvent::Personal(_)));
+        .retain(|queued| !matches!(&queued.event, AlertEvent::Global(_)));
     if state.active_global {
+        state.dismissed = true;
+        queue.changed.notify_all();
+    }
+}
+
+pub fn disable_banked(app: &AppHandle) {
+    let queue = &app.state::<AppState>().reset_alerts;
+    let mut state = queue.state.lock().unwrap();
+    state
+        .pending
+        .retain(|queued| !matches!(&queued.event, AlertEvent::Banked(_)));
+    if state.active_banked {
+        state.dismissed = true;
+        queue.changed.notify_all();
+    }
+}
+
+/// Called while the account transition is held; never reads the account registry here.
+pub fn account_changed(app: &AppHandle, provider: &str) {
+    let provider = if provider == "antigravity" {
+        "gemini"
+    } else {
+        provider
+    };
+    let queue = &app.state::<AppState>().reset_alerts;
+    let mut state = queue.state.lock().unwrap();
+    state.pending.retain(|queued| !matches!(&queued.event, AlertEvent::Personal(event) if event.provider == provider));
+    if state.active_provider.as_deref() == Some(provider) {
         state.dismissed = true;
         queue.changed.notify_all();
     }
@@ -481,6 +609,7 @@ pub fn preview_reset_alert(app: AppHandle) -> Result<(), String> {
             next_reset_at: Some(now + 300 * 60_000),
         }),
         true,
+        None,
     );
     Ok(())
 }
@@ -499,6 +628,33 @@ pub fn preview_global(app: AppHandle) -> Result<(), String> {
             audience: vec!["codex".into(), "chatgpt_work".into()],
         }),
         true,
+        None,
+    );
+    Ok(())
+}
+
+pub fn preview_banked(app: AppHandle) -> Result<(), String> {
+    if crate::target_screen(&app).is_none() {
+        return Err("No display available for the reset card".into());
+    }
+    enqueue_unchecked(
+        &app,
+        AlertEvent::Banked(crate::global_reset::PublicEvent {
+            id: "preview".into(),
+            announced_at: crate::now_ms(),
+            kind: "banked".into(),
+            group: "banked".into(),
+            announcement_state: "announced".into(),
+            banked_state: Some("available".into()),
+            confirmed: false,
+            preview: true,
+            summary: "Preview of the public banked reset card".into(),
+            url: Some(crate::global_reset::SOURCE_URL.into()),
+            audience: vec!["codex".into(), "chatgpt_work".into()],
+            source: "timeline".into(),
+        }),
+        true,
+        None,
     );
     Ok(())
 }

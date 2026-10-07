@@ -128,6 +128,9 @@
   .c-head{display:flex;align-items:center;gap:8px;margin-bottom:4px}
   .c-title{font-size:14px;font-weight:700}
   .c-sub{font-size:11px;color:var(--ink-dim);margin-bottom:10px}
+  .c-account{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:10px;color:var(--ink-dim);margin:0 0 9px;min-width:0}
+  .c-account-name{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .c-account-status{font-size:9px;flex:none;padding:2px 5px;border-radius:4px;background:var(--track)}
   .win{margin-top:10px}
   .w-row{display:flex;justify-content:space-between;align-items:baseline;font-size:12px;flex-wrap:wrap;column-gap:8px}
   .w-label{color:var(--ink-2);font-weight:600;white-space:nowrap}
@@ -1324,6 +1327,48 @@ async function signInClaude(){
   renderCard();
 }
 // CLAUDE_AUTH_ACTIONS_END
+// ACCOUNT_PROFILE_METADATA_START
+let notchAccountProviders=[],notchAccountRevision=0;
+function notchActiveProfile(provider){
+  const id=provider==='gemini'?'antigravity':provider;
+  const p=notchAccountProviders.find(p=>p.id===id||p.id===provider);
+  return p&&Array.isArray(p.accounts)?p.accounts.find(a=>a&&(a.active||a.id===p.active_account_id))||null:null;
+}
+function notchAccountHtml(p,snap,now){
+  const profile=notchActiveProfile(p.base);
+  if(!profile||p.id!==p.base)return '';
+  const fresh=snap.status==='ok'&&typeof snap.fetched_at==='number'&&snap.fetched_at>0&&snap.fetched_at<=now+60000&&now-snap.fetched_at<=300000;
+  const status=fresh?'LIVE':snap.windows.length?'Cached':profile.status==='expired'?'Sign-in expired':profile.status==='needsAuth'?'Sign in needed':'Waiting for reading';
+  return `<div class="c-account"><span class="c-account-name">${esc(profile.label||'Account')}</span><span class="c-account-status" ${fresh?'style="color:var(--ample)"':''}>${esc(textCopy(status))}</span></div>`;
+}
+function applyNotchAccountMetadata(state){
+  if(!state||!Array.isArray(state.providers))return;
+  const before=new Map(notchAccountProviders.map(p=>[p.id,(p.accounts||[]).find(a=>a&&(a.active||a.id===p.active_account_id))?.id]));
+  notchAccountProviders=state.providers;
+  for(const provider of notchAccountProviders){
+    const active=notchActiveProfile(provider.id);
+    if(!before.has(provider.id)||before.get(provider.id)===active?.id)continue;
+    const empty={status:'none',windows:[],fetched_at:0,note:'Refreshing selected account…'};
+    switch(provider.id){
+      case 'claude':usage=empty;break;case 'codex':codexSnap=empty;break;case 'cursor':cursorSnap=empty;break;
+      case 'grok':grokSnap=empty;break;case 'copilot':copilotSnap=empty;break;case 'glm':glmSnap=empty;break;
+      case 'opencode':opencodeSnap=empty;break;case 'gemini':case 'antigravity':agSnap=empty;break;
+    }
+  }
+  renderRing();if(card.classList.contains('show'))renderCard();
+}
+async function refreshNotchAccountMetadata(){
+  const revision=notchAccountRevision;
+  try{const state=await invoke('list_provider_accounts');if(revision===notchAccountRevision)applyNotchAccountMetadata(state);}catch(e){/* Profiles are also available in Settings. */}
+}
+function readNotchProviderSnapshot(command,apply){
+  const revision=notchAccountRevision;
+  return invoke(command).then(snapshot=>{
+    if(revision!==notchAccountRevision)return;
+    apply(snapshot);renderRing();if(card.classList.contains('show'))renderCard();
+  });
+}
+// ACCOUNT_PROFILE_METADATA_END
 function renderCard(){
   const c=document.getElementById('card');
   const p=providers().find(x=>x.id===hoverId)||providers()[0];
@@ -1332,6 +1377,7 @@ function renderCard(){
   // p.name is no longer a constant: for a second account it is built from the home
   // directory's slug and the subscriptionType read out of .credentials.json.
   let html=`<div class="c-head">${headIcon}<span class="c-title">${esc(ui().title(p.name))}</span></div>`;
+  html+=notchAccountHtml(p,snap,Date.now());
   if(staleOf(snap)&&snap.fetched_at) html+=`<div class="c-sub">${ui().updated(ago(snap.fetched_at))}</div>`;
   if(snap.status==='needsAuth'){
     const who={claude:'Sign in to Claude Code to see usage.',cursor:'Sign in to Cursor to see usage.',codex:'Sign in to Codex to see usage.',grok:'Run grok login to see usage.',copilot:'Run gh auth login to see usage.',opencode:'Run opencode auth login to see usage.',gemini:'Sign in to Antigravity to see usage.'}[p.base]||'';
@@ -2104,18 +2150,18 @@ listen('state',e=>{stateSnap=e.payload||stateSnap;setUiLanguage(stateSnap.lang_r
 listen('notice',e=>notice(e.payload)).catch(()=>{});
 listen('codex',e=>{codexSnap=e.payload||codexSnap;settle('codex');renderRing();if(card.classList.contains('show'))renderCard();}).catch(()=>{});
 listen('cursor',e=>{cursorSnap=e.payload||cursorSnap;settle('cursor');renderRing();if(card.classList.contains('show'))renderCard();}).catch(()=>{});
-invoke('get_cursor').then(u=>{cursorSnap=u||cursorSnap;renderRing();}).catch(()=>{});
+readNotchProviderSnapshot('get_cursor',u=>{cursorSnap=u||cursorSnap;}).catch(()=>{});
 listen('grok',e=>{grokSnap=e.payload||grokSnap;settle('grok');renderRing();if(card.classList.contains('show'))renderCard();}).catch(()=>{});
-invoke('get_grok').then(u=>{grokSnap=u||grokSnap;renderRing();}).catch(()=>{});
+readNotchProviderSnapshot('get_grok',u=>{grokSnap=u||grokSnap;}).catch(()=>{});
 listen('copilot',e=>{copilotSnap=e.payload||copilotSnap;settle('copilot');renderRing();if(card.classList.contains('show'))renderCard();}).catch(()=>{});
-invoke('get_copilot').then(u=>{copilotSnap=u||copilotSnap;renderRing();}).catch(()=>{});
+readNotchProviderSnapshot('get_copilot',u=>{copilotSnap=u||copilotSnap;}).catch(()=>{});
 
 listen('antigravity',e=>{agSnap=e.payload||agSnap;settle('gemini');renderRing();if(card.classList.contains('show'))renderCard();}).catch(()=>{});
-invoke('get_antigravity').then(u=>{agSnap=u||agSnap;renderRing();}).catch(()=>{});
+readNotchProviderSnapshot('get_antigravity',u=>{agSnap=u||agSnap;}).catch(()=>{});
 listen('glm',e=>{glmSnap=e.payload||glmSnap;renderRing();if(card.classList.contains('show'))renderCard();}).catch(()=>{});
-invoke('get_glm').then(u=>{glmSnap=u||glmSnap;renderRing();}).catch(()=>{});
+readNotchProviderSnapshot('get_glm',u=>{glmSnap=u||glmSnap;}).catch(()=>{});
 listen('opencode',e=>{opencodeSnap=e.payload||opencodeSnap;settle('opencode');renderRing();if(card.classList.contains('show'))renderCard();}).catch(()=>{});
-invoke('get_opencode').then(u=>{opencodeSnap=u||opencodeSnap;renderRing();}).catch(()=>{});
+readNotchProviderSnapshot('get_opencode',u=>{opencodeSnap=u||opencodeSnap;}).catch(()=>{});
 invoke('get_notch_slots').then(v=>{if(Array.isArray(v)){notchSlots=v;renderRing();}}).catch(()=>{});
 listen('notch_slots',e=>{
   notchSlots=Array.isArray(e.payload)?e.payload:null;
@@ -2144,8 +2190,10 @@ listen('notch_edge',e=>applyEdge(e.payload)).catch(()=>{});
 // applyEdge measures for the edge it is given; on the right-hand one it returns early, so the first
 // measurement is made here either way — and still made if the ask fails, from the default edge.
 invoke('get_notch_edge').then(e=>{applyEdge(e);reportDpr();}).catch(()=>reportDpr());
-invoke('get_codex').then(u=>{codexSnap=u||codexSnap;renderRing();}).catch(()=>{});
-invoke('get_usage').then(u=>{usage=u||usage;renderRing();}).catch(e=>notice('get_usage failed: '+e));
+readNotchProviderSnapshot('get_codex',u=>{codexSnap=u||codexSnap;}).catch(()=>{});
+listen('accounts-updated',e=>{notchAccountRevision++;if(e.payload&&Array.isArray(e.payload.providers))applyNotchAccountMetadata(e.payload);else refreshNotchAccountMetadata();}).catch(()=>{});
+refreshNotchAccountMetadata();
+readNotchProviderSnapshot('get_usage',u=>{usage=u||usage;}).catch(e=>notice('get_usage failed: '+e));
 invoke('get_state').then(s=>{stateSnap=s||stateSnap;setUiLanguage(stateSnap.lang_resolved);renderRing();}).catch(()=>{});
 setInterval(renderRing,30_000); // stale state and reset copy move with time
 setInterval(async()=>{

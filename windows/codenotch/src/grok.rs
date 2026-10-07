@@ -48,16 +48,34 @@ pub fn request_refresh() {
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Windows: %USERPROFILE%\.grok\auth.json (macOS: ~/.grok/auth.json)
 pub fn auth_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".grok").join("auth.json"))
+    if let Some(profile) = crate::accounts::active("grok") {
+        return Some(
+            profile
+                .credential_path
+                .unwrap_or_else(|| profile.root.join("auth.json")),
+        );
+    }
+    external_auth_path()
+}
+
+fn external_auth_path() -> Option<PathBuf> {
+    std::env::var_os("GROK_HOME")
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|h| h.join(".grok")))
+        .map(|p| p.join("auth.json"))
 }
 
 fn store_path() -> PathBuf {
-    crate::config::config_path().with_file_name("grok.json")
+    crate::accounts::cache_path("grok", "grok.json")
 }
 
 pub fn load_persisted() -> UsageSnapshot {
@@ -73,14 +91,8 @@ pub fn load_persisted() -> UsageSnapshot {
         .unwrap_or_default()
 }
 
-fn persist(s: &UsageSnapshot) {
-    if let Ok(t) = serde_json::to_string_pretty(s) {
-        let _ = std::fs::write(store_path(), t);
-    }
-}
-
 pub fn present() -> bool {
-    auth_path().map(|p| p.is_file()).unwrap_or(false)
+    crate::accounts::active("grok").is_some() || auth_path().map(|p| p.is_file()).unwrap_or(false)
 }
 
 // ---------------- Credentials ----------------
@@ -120,18 +132,27 @@ pub fn pick(root: &serde_json::Value) -> Option<Creds> {
         if !is_trusted(key, entry) {
             continue;
         }
-        let token = entry.get("key").and_then(|x| x.as_str()).unwrap_or_default();
+        let token = entry
+            .get("key")
+            .and_then(|x| x.as_str())
+            .unwrap_or_default();
         if token.is_empty() {
             continue;
         }
         trusted.push(Creds {
             token: token.to_string(),
             expires_at: iso_ms(entry.get("expires_at")).unwrap_or(0),
-            email: entry.get("email").and_then(|x| x.as_str()).map(|s| s.to_string()),
+            email: entry
+                .get("email")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string()),
         });
     }
     let now = now_ms();
-    if let Some(i) = trusted.iter().position(|c| c.expires_at == 0 || c.expires_at > now) {
+    if let Some(i) = trusted
+        .iter()
+        .position(|c| c.expires_at == 0 || c.expires_at > now)
+    {
         return Some(trusted.swap_remove(i));
     }
     trusted.into_iter().next()
@@ -139,10 +160,25 @@ pub fn pick(root: &serde_json::Value) -> Option<Creds> {
 
 /// Re-read every time: the CLI rotates the token, and holding on to an old value signs us out
 fn read_credentials() -> Option<Creds> {
-    let path = auth_path()?;
-    let text = std::fs::read_to_string(path).ok()?;
+    let text = if crate::accounts::active("grok").is_some() {
+        // Official isolated CLI profiles retain their refreshable auth store.
+        // A captured external login has only its protected imported secret.
+        std::fs::read_to_string(auth_path()?)
+            .ok()
+            .or_else(|| crate::accounts::secret("grok"))?
+    } else {
+        std::fs::read_to_string(auth_path()?).ok()?
+    };
     let root: serde_json::Value = serde_json::from_str(&text).ok()?;
     pick(&root)
+}
+
+/// Native-only import; the secret is encrypted by the account registry.
+pub(crate) fn capture_current_credential() -> Option<String> {
+    let text = std::fs::read_to_string(external_auth_path()?).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    pick(&v)?;
+    Some(text)
 }
 
 // ---------------- Token renewal (usage.rs's Claude renewer, pointed at the Grok CLI) ----------------
@@ -170,14 +206,18 @@ pub fn find_cli() -> Option<PathBuf> {
 
 /// `grok models` starts up (where the CLI renews an aged token), prints the model list and exits:
 /// no session, no transcript, no allowance spent. Output goes nowhere.
-fn run_renewal(cli: &std::path::Path) -> std::io::Result<()> {
+fn run_renewal(cli: &std::path::Path, auth: &std::path::Path) -> std::io::Result<()> {
     use std::process::{Command, Stdio};
     let mut cmd = Command::new(cli);
-    cmd.arg("models").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    cmd.arg("models")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     // Which session gets renewed is said here, never inherited: a GROK_HOME pointed elsewhere would
     // renew that copy while the file read here stayed stale
-    if let Some(dir) = auth_path().as_deref().and_then(|p| p.parent()) {
+    if let Some(dir) = auth.parent() {
         cmd.env("GROK_HOME", dir);
+        cmd.env_remove("GROK_API_KEY").env_remove("XAI_API_KEY");
     }
     #[cfg(windows)]
     {
@@ -208,12 +248,21 @@ struct Renewer {
 impl Renewer {
     /// Renews if the token is about to expire. Some(true) = the expiry moved; judged on the file, never on
     /// the exit status
-    fn maybe_renew(&mut self, creds: &Creds) -> Option<bool> {
+    fn maybe_renew(&mut self, creds: &Creds, auth: Option<&std::path::Path>) -> Option<bool> {
+        // The immutable auth path was captured with the credential. Imported
+        // secrets have no CLI refresh store and cannot renew another account.
+        let auth = auth?;
         let expires_at = (creds.expires_at > 0).then_some(creds.expires_at);
         let now = now_ms();
         // The CLI renews at its own five-minute mark, as Claude Code does, so the Claude timing and
         // retry policy carry over unchanged
-        if !crate::usage::should_renew(expires_at, now, self.attempted_for, self.last_attempt, self.failures) {
+        if !crate::usage::should_renew(
+            expires_at,
+            now,
+            self.attempted_for,
+            self.last_attempt,
+            self.failures,
+        ) {
             return None;
         }
         if self.attempted_for != expires_at {
@@ -226,16 +275,27 @@ impl Renewer {
             crate::applog("grok: token about to expire and no grok CLI found to renew it");
             return Some(false);
         };
-        if let Err(e) = run_renewal(&cli) {
-            crate::applog(&format!("grok: token renewal could not start ({}): {e}", cli.display()));
+        if let Err(e) = run_renewal(&cli, auth) {
+            crate::applog(&format!(
+                "grok: token renewal could not start ({}): {e}",
+                cli.display()
+            ));
             return Some(false);
         }
-        let after = read_credentials().map(|c| c.expires_at).unwrap_or(0);
+        let after = std::fs::read_to_string(auth)
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| pick(&v))
+            .map(|c| c.expires_at)
+            .unwrap_or(0);
         let renewed = after > creds.expires_at;
         crate::applog(&if renewed {
             format!("grok: token renewed via {}", cli.display())
         } else {
-            format!("grok: ran {} but the token expiry did not move", cli.display())
+            format!(
+                "grok: ran {} but the token expiry did not move",
+                cli.display()
+            )
         });
         Some(renewed)
     }
@@ -243,9 +303,14 @@ impl Renewer {
 
 /// For doctor: contains no secret values
 pub fn probe() -> String {
-    let Some(p) = auth_path() else { return "Grok: cannot locate the home directory".into() };
+    let Some(p) = auth_path() else {
+        return "Grok: cannot locate the home directory".into();
+    };
     if !p.is_file() {
-        return format!("Grok: {} not found (CLI not installed, or not signed in)", p.display());
+        return format!(
+            "Grok: {} not found (CLI not installed, or not signed in)",
+            p.display()
+        );
     }
     match read_credentials() {
         // No account email: doctor output is what people paste into issues.
@@ -268,7 +333,8 @@ pub fn probe() -> String {
 // ---------------- Parsing ----------------
 
 fn pct(v: Option<&serde_json::Value>) -> Option<f64> {
-    v.and_then(|x| x.as_f64()).map(|p| (p / 100.0).clamp(0.0, 1.0))
+    v.and_then(|x| x.as_f64())
+        .map(|p| (p / 100.0).clamp(0.0, 1.0))
 }
 
 /// "GrokBuild" → "Grok Build". The wire name is one word; the usage modal writes two.
@@ -310,13 +376,25 @@ pub fn parse_credits(v: &serde_json::Value) -> (Vec<LimitWindow>, String) {
         });
     } else if let Some(products) = products {
         for product in products {
-            let Some(used) = pct(product.get("usagePercent")) else { continue };
+            let Some(used) = pct(product.get("usagePercent")) else {
+                continue;
+            };
             let wire = product.get("product").and_then(|x| x.as_str());
             let label = wire.map(humanize).unwrap_or_else(|| "Usage".into());
             // The ring reads the window whose id is "credits"; using the wire name for the first
             // one left a valid bar on the card and a dash on the cell.
-            let id = if out.is_empty() { "credits".to_string() } else { wire.unwrap_or(&label).to_string() };
-            out.push(LimitWindow { id, label, used, resets_at, ..Default::default() });
+            let id = if out.is_empty() {
+                "credits".to_string()
+            } else {
+                wire.unwrap_or(&label).to_string()
+            };
+            out.push(LimitWindow {
+                id,
+                label,
+                used,
+                resets_at,
+                ..Default::default()
+            });
         }
     }
 
@@ -349,12 +427,14 @@ pub fn parse_credits(v: &serde_json::Value) -> (Vec<LimitWindow>, String) {
 
 enum FetchErr {
     NeedsAuth,
-    RateLimited,
+    RateLimited(u64),
     Other(String),
 }
 
 fn fetch_once(token: &str) -> Result<serde_json::Value, FetchErr> {
-    let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(15)).build();
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(15))
+        .build();
     match agent
         .get(ENDPOINT)
         .set("Authorization", &format!("Bearer {token}"))
@@ -362,23 +442,49 @@ fn fetch_once(token: &str) -> Result<serde_json::Value, FetchErr> {
         .set("Accept", "application/json")
         .call()
     {
-        Ok(r) => r.into_json::<serde_json::Value>().map_err(|e| FetchErr::Other(format!("parse: {e}"))),
-        Err(ureq::Error::Status(401, _)) | Err(ureq::Error::Status(403, _)) => Err(FetchErr::NeedsAuth),
-        Err(ureq::Error::Status(429, _)) => Err(FetchErr::RateLimited),
+        Ok(r) => r
+            .into_json::<serde_json::Value>()
+            .map_err(|e| FetchErr::Other(format!("parse: {e}"))),
+        Err(ureq::Error::Status(401, _)) | Err(ureq::Error::Status(403, _)) => {
+            Err(FetchErr::NeedsAuth)
+        }
+        Err(ureq::Error::Status(429, response)) => Err(FetchErr::RateLimited(
+            response
+                .header("retry-after")
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(60)
+                .max(60),
+        )),
         Err(ureq::Error::Status(code, _)) => Err(FetchErr::Other(format!("HTTP {code}"))),
         Err(e) => Err(FetchErr::Other(format!("{e}"))),
     }
 }
 
-fn read_once(prev: &UsageSnapshot, renewer: &mut Renewer) -> UsageSnapshot {
+fn read_once(
+    prev: &UsageSnapshot,
+    captured: Option<Creds>,
+    auth: Option<&std::path::Path>,
+    renewer: &mut Renewer,
+) -> UsageSnapshot {
     let mut snap = prev.clone();
-    let Some(mut creds) = read_credentials() else {
+    if snap.backoff_until > now_ms() {
+        snap.note = format!(
+            "Rate limited — retrying in {}s",
+            snap.backoff_until.saturating_sub(now_ms()) / 1000
+        );
+        return snap;
+    }
+    let Some(mut creds) = captured else {
         snap.status = "needsAuth".into();
         snap.note = "Run grok login — it signs in and refreshes the token this reads.".into();
         return snap;
     };
-    if renewer.maybe_renew(&creds) == Some(true) {
-        if let Some(fresh) = read_credentials() {
+    if renewer.maybe_renew(&creds, auth) == Some(true) {
+        if let Some(fresh) = auth
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| pick(&v))
+        {
             creds = fresh;
         }
     }
@@ -386,6 +492,7 @@ fn read_once(prev: &UsageSnapshot, renewer: &mut Renewer) -> UsageSnapshot {
     // written, and only the endpoint can say. A 401 below is what actually decides it.
     match fetch_once(&creds.token) {
         Ok(v) => {
+            snap.backoff_until = 0;
             let (windows, note) = parse_credits(&v);
             snap.fetched_at = now_ms();
             if windows.is_empty() {
@@ -405,70 +512,107 @@ fn read_once(prev: &UsageSnapshot, renewer: &mut Renewer) -> UsageSnapshot {
             snap.status = "needsAuth".into();
             snap.note = "Grok session was rejected — run grok login again".into();
         }
-        Err(FetchErr::RateLimited) => {
-            snap.status = if snap.windows.is_empty() { "error" } else { "stale" }.into();
+        Err(FetchErr::RateLimited(wait)) => {
+            snap.backoff_until = now_ms().saturating_add(wait.saturating_mul(1000));
+            snap.status = if snap.windows.is_empty() {
+                "error"
+            } else {
+                "stale"
+            }
+            .into();
             snap.note = "Grok is rate limiting; the last reading stands".into();
         }
         Err(FetchErr::Other(msg)) => {
             // Stale beats invented: keep the old reading, marked stale
-            snap.status = if snap.windows.is_empty() { "error" } else { "stale" }.into();
+            snap.status = if snap.windows.is_empty() {
+                "error"
+            } else {
+                "stale"
+            }
+            .into();
             snap.note = msg;
         }
     }
     snap
 }
 
-fn broadcast(app: &AppHandle, snap: UsageSnapshot) {
-    let st = app.state::<AppState>();
-    *st.grok.lock().unwrap() = snap.clone();
-    persist(&snap);
-    let _ = app.emit("grok", &snap);
-}
-
-fn sleep_interruptible(secs: u64) {
-    for _ in 0..secs {
-        if REFRESH.swap(false, std::sync::atomic::Ordering::Relaxed) {
-            return;
-        }
-        std::thread::sleep(Duration::from_secs(1));
-    }
+fn broadcast(app: &AppHandle, snap: UsageSnapshot, selection: &str) {
+    let _ = crate::accounts::with_selection("grok", selection, || {
+        let st = app.state::<AppState>();
+        *st.grok.lock().unwrap() = snap.clone();
+        let _ = app.emit("grok", &snap);
+    });
 }
 
 pub fn start(app: AppHandle) {
     std::thread::spawn(move || {
-        {
-            let st = app.state::<AppState>();
-            let snap = st.grok.lock().unwrap().clone();
-            let _ = app.emit("grok", &snap);
-        }
-        if !present() {
-            broadcast(&app, UsageSnapshot { status: "absent".into(), ..Default::default() });
-            loop {
-                sleep_interruptible(600); // Grok CLI is not installed: look again every 10 minutes
-                if present() {
+        let mut renewers = std::collections::HashMap::<String, Renewer>::new();
+        loop {
+            let selection = crate::accounts::selection_key("grok");
+            // Freeze the credential and its cache while account switching is
+            // locked. Network I/O then runs without holding the settings lock.
+            let Some((prev, cache, creds, installed, auth)) =
+                crate::accounts::with_selection("grok", &selection, || {
+                    (
+                        load_persisted(),
+                        store_path(),
+                        read_credentials(),
+                        present(),
+                        auth_path().filter(|p| p.is_file()),
+                    )
+                })
+            else {
+                continue;
+            };
+            let snap = if installed {
+                read_once(
+                    &prev,
+                    creds,
+                    auth.as_deref(),
+                    renewers.entry(selection.clone()).or_default(),
+                )
+            } else {
+                UsageSnapshot {
+                    status: "absent".into(),
+                    ..Default::default()
+                }
+            };
+            let hold = snap.backoff_until.saturating_sub(now_ms()) / 1000;
+            // An old credential must not restore cached usage after a profile
+            // reconnect. Preserve only provider Retry-After on rejected reads.
+            if crate::accounts::with_selection("grok", &selection, || {
+                crate::agy_cli::save_persisted_to(&cache, &snap)
+            })
+            .is_none()
+            {
+                crate::accounts::preserve_backoff(&cache, snap.backoff_until);
+            }
+            broadcast(&app, snap, &selection);
+            for _ in 0..POLL_SECS.max(hold) {
+                if REFRESH.swap(false, std::sync::atomic::Ordering::Relaxed) {
                     break;
                 }
+                std::thread::sleep(Duration::from_secs(1));
             }
-        }
-        let mut renewer = Renewer::default();
-        loop {
-            let prev = {
-                let st = app.state::<AppState>();
-                let s = st.grok.lock().unwrap().clone();
-                s
-            };
-            let snap = read_once(&prev, &mut renewer);
-            if snap.status == "error" || snap.status == "stale" {
-                crate::applog(&format!("grok: {}", snap.note));
-            }
-            broadcast(&app, snap);
-            sleep_interruptible(POLL_SECS);
         }
     });
 }
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_selected_accounts_retry_after_is_not_bypassed_by_refresh() {
+        let prev = UsageSnapshot {
+            backoff_until: now_ms() + 120_000,
+            note: "previous".into(),
+            ..Default::default()
+        };
+        let snap = read_once(&prev, None, None, &mut Renewer::default());
+        assert_eq!(snap.backoff_until, prev.backoff_until);
+        assert!(snap.note.starts_with("Rate limited"));
+    }
+
     use super::*;
 
     #[test]
@@ -498,8 +642,10 @@ mod tests {
 
     #[test]
     fn a_customer_idp_entry_alone_is_not_used() {
-        let root: serde_json::Value =
-            serde_json::from_str(r#"{ "https://idp.example.com::abc": { "key": "private-proxy" } }"#).unwrap();
+        let root: serde_json::Value = serde_json::from_str(
+            r#"{ "https://idp.example.com::abc": { "key": "private-proxy" } }"#,
+        )
+        .unwrap();
         assert!(pick(&root).is_none());
     }
 
@@ -549,21 +695,34 @@ mod tests {
     }
 
     fn creds(expires_at: u64) -> Creds {
-        Creds { token: "t".into(), expires_at, email: None }
+        Creds {
+            token: "t".into(),
+            expires_at,
+            email: None,
+        }
     }
 
     // Neither case may reach the CLI: both are decided before any launch.
     #[test]
     fn a_session_without_an_expiry_is_never_renewed_on_a_guess() {
         let mut r = Renewer::default();
-        assert_eq!(r.maybe_renew(&creds(0)), None);
+        assert_eq!(
+            r.maybe_renew(&creds(0), Some(std::path::Path::new("synthetic/auth.json"))),
+            None
+        );
         assert_eq!(r.last_attempt, None);
     }
 
     #[test]
     fn a_live_session_is_left_alone() {
         let mut r = Renewer::default();
-        assert_eq!(r.maybe_renew(&creds(now_ms() + 60 * 60 * 1000)), None);
+        assert_eq!(
+            r.maybe_renew(
+                &creds(now_ms() + 60 * 60 * 1000),
+                Some(std::path::Path::new("synthetic/auth.json"))
+            ),
+            None
+        );
         assert_eq!(r.last_attempt, None);
     }
 }

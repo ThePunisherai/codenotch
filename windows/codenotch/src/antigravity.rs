@@ -31,19 +31,21 @@
 //!      compared by local day). This is a **count, not a percentage** — there is no published
 //!      denominator, so the ring draws only its track.
 //!
-//! Read only; token values are never cached and never appear in any log.
+//! External credentials are read only. Explicit account imports are protected
+//! by Windows DPAPI; secrets never enter IPC responses, preferences, or logs.
 
 use crate::usage::{LimitWindow, UsageSnapshot};
 use crate::AppState;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager};
 
 const POLL_SECS: u64 = 300;
 const CLI_TTL: Duration = Duration::from_secs(300);
 const LOAD_CODE_ASSIST: &str = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist";
-const QUOTA_SUMMARY: &str = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary";
+const QUOTA_SUMMARY: &str =
+    "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary";
 const LS_SERVICE: &str = "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary";
 const CSRF_HEADER: &str = "x-codeium-csrf-token";
 
@@ -59,9 +61,17 @@ pub fn request_refresh() {
 }
 
 pub fn request_hover_refresh() {
-    // Hover must not wake the legacy adapter's periodic poller.
     if let Some(sender) = REFRESH_CLI.lock().unwrap().as_ref() {
-        let _ = sender.try_send(());
+        let fresh = std::fs::read_to_string(store_path())
+            .ok()
+            .and_then(|s| serde_json::from_str::<UsageSnapshot>(&s).ok())
+            .is_some_and(|s| {
+                s.status == "ok"
+                    && now_ms().saturating_sub(s.fetched_at) < CLI_TTL.as_millis() as u64
+            });
+        if !fresh {
+            let _ = sender.try_send(());
+        }
     }
 }
 
@@ -84,11 +94,18 @@ fn now_ms() -> u64 {
 /// just the first that exists: switching flavour leaves the old directory behind, so the first can
 /// be empty while the transcripts sit in the next (#84 hit this on macOS).
 pub(crate) fn state_roots() -> Vec<PathBuf> {
-    dirs::home_dir().map(|h| state_roots_in(&h)).unwrap_or_default()
+    if let Some(profile) = crate::accounts::active("antigravity") {
+        return state_roots_in(&profile.root);
+    }
+    dirs::home_dir()
+        .map(|h| state_roots_in(&h))
+        .unwrap_or_default()
 }
 
 fn state_roots_in(home: &Path) -> Vec<PathBuf> {
-    let Ok(rd) = std::fs::read_dir(home.join(".gemini")) else { return vec![] };
+    let Ok(rd) = std::fs::read_dir(home.join(".gemini")) else {
+        return vec![];
+    };
     let mut out: Vec<PathBuf> = rd
         .flatten()
         .filter(|e| e.file_name().to_string_lossy().starts_with("antigravity"))
@@ -100,57 +117,38 @@ fn state_roots_in(home: &Path) -> Vec<PathBuf> {
 }
 
 fn store_path() -> PathBuf {
-    crate::config::config_path().with_file_name("antigravity.json")
+    crate::accounts::cache_path("antigravity", "antigravity.json")
 }
 
 pub fn load_persisted() -> UsageSnapshot {
-    if crate::agy_cli::find_agy().is_some() {
-        let mut snap = std::fs::read_to_string(store_path())
-            .ok()
-            .and_then(|s| serde_json::from_str::<UsageSnapshot>(&s).ok())
-            .unwrap_or_default();
-        if !snap.note.starts_with("via Antigravity CLI") {
-            snap = UsageSnapshot::default();
-        }
-        snap.status = if snap.windows.is_empty() {
-            "error"
-        } else if now_ms().saturating_sub(snap.fetched_at) < CLI_TTL.as_millis() as u64 {
-            "ok"
-        } else {
-            "stale"
-        }
-        .into();
-        if snap.windows.is_empty() {
-            snap.note = "Waiting for Antigravity CLI quota".into();
-        }
-        snap
-    } else {
-        std::fs::read_to_string(store_path())
-            .ok()
-            .and_then(|t| serde_json::from_str::<UsageSnapshot>(&t).ok())
-            .map(|mut s| {
-                if !s.windows.is_empty() {
-                    s.status = "stale".into();
-                }
-                s
-            })
-            .unwrap_or_default()
-    }
-}
-
-fn persist(s: &UsageSnapshot) {
-    let _ = crate::agy_cli::save_persisted_to(&store_path(), s);
+    // CLI installation cannot invalidate a reading from the signed-in IDE or
+    // an explicitly imported account. All sources share this profile's cache.
+    std::fs::read_to_string(store_path())
+        .ok()
+        .and_then(|s| serde_json::from_str::<UsageSnapshot>(&s).ok())
+        .map(|mut s| {
+            if s.status == "ok"
+                && !s.windows.is_empty()
+                && now_ms().saturating_sub(s.fetched_at) >= CLI_TTL.as_millis() as u64
+            {
+                s.status = "stale".into();
+            }
+            s
+        })
+        .unwrap_or_default()
 }
 
 /// Is Antigravity installed: the official CLI is available, or any state
 /// directory exists, or Credential Manager holds its token
 pub fn present() -> bool {
-    crate::agy_cli::find_agy().is_some() || legacy_present()
+    crate::accounts::active("antigravity").is_some()
+        || crate::agy_cli::find_agy().is_some()
+        || legacy_present()
 }
 
 /// Every `~/.gemini/antigravity*` install counts, not only the first one found.
 fn legacy_present() -> bool {
-    !state_roots().is_empty() || read_credential_raw().is_some()
+    !state_roots().is_empty() || read_external_credentials().is_some()
 }
 
 // ---------------- 1. Local bridge ----------------
@@ -163,18 +161,25 @@ struct Endpoint {
 
 fn run_hidden(program: &str, args: &[&str]) -> String {
     let mut cmd = std::process::Command::new(program);
-    cmd.args(args).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    cmd.args(args)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0800_0000);
     }
-    cmd.output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default()
+    cmd.output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default()
 }
 
 /// The process table is the only source of truth: the token is on the command line and the port is written nowhere
 #[cfg(windows)]
 fn discover() -> Option<Endpoint> {
+    if crate::accounts::active("antigravity").is_some() {
+        return None;
+    }
     // PowerShell CIM query: one "pid<TAB>commandline" per line
     let table = run_hidden(
         "powershell",
@@ -185,7 +190,7 @@ fn discover() -> Option<Endpoint> {
             "Get-CimInstance Win32_Process -Filter \"Name LIKE '%language_server%'\" | ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }",
         ],
     );
-    let line = table.lines().find(|l| l.contains("--csrf_token"))?;
+    let line = table.lines().find(|l| antigravity_process(l))?;
     let (pid_s, cmdline) = line.split_once('\t')?;
     let pid: u32 = pid_s.trim().parse().ok()?;
     let csrf = flag_value(cmdline, "--csrf_token")?;
@@ -197,11 +202,17 @@ fn discover() -> Option<Endpoint> {
 }
 #[cfg(not(windows))]
 fn discover() -> Option<Endpoint> {
+    if crate::accounts::active("antigravity").is_some() {
+        return None;
+    }
     let table = run_hidden("ps", &["-Ao", "pid,command"]);
-    let line = table.lines().find(|l| l.contains("language_server") && l.contains("--csrf_token"))?;
+    let line = table.lines().find(|l| antigravity_process(l))?;
     let pid: u32 = line.trim().split_whitespace().next()?.parse().ok()?;
     let csrf = flag_value(line, "--csrf_token")?;
-    let out = run_hidden("lsof", &["-nP", "-a", "-p", &pid.to_string(), "-iTCP", "-sTCP:LISTEN"]);
+    let out = run_hidden(
+        "lsof",
+        &["-nP", "-a", "-p", &pid.to_string(), "-iTCP", "-sTCP:LISTEN"],
+    );
     let ports: Vec<u16> = out
         .lines()
         .filter_map(|l| l.split_whitespace().rev().find(|w| w.contains(':')))
@@ -211,6 +222,13 @@ fn discover() -> Option<Endpoint> {
         return None;
     }
     Some(Endpoint { ports, csrf })
+}
+
+fn antigravity_process(line: &str) -> bool {
+    let line = line.to_ascii_lowercase();
+    line.contains("language_server")
+        && line.contains("--csrf_token")
+        && (line.contains("antigravity") || line.contains("jetski"))
 }
 
 fn flag_value(line: &str, flag: &str) -> Option<String> {
@@ -247,7 +265,12 @@ fn local_agent() -> Option<ureq::Agent> {
         .danger_accept_invalid_hostnames(true)
         .build()
         .ok()?;
-    Some(ureq::AgentBuilder::new().tls_connector(Arc::new(tls)).timeout(Duration::from_secs(10)).build())
+    Some(
+        ureq::AgentBuilder::new()
+            .tls_connector(Arc::new(tls))
+            .timeout(Duration::from_secs(10))
+            .build(),
+    )
 }
 
 fn bridge_quota(ep: &Endpoint) -> Result<Vec<LimitWindow>, String> {
@@ -287,19 +310,34 @@ fn parse_iso(v: Option<&serde_json::Value>) -> Option<u64> {
 /// The server reports what remains and the notch shows what is used: flip it here so the view never learns about provider differences
 pub fn windows_from_bridge(v: &serde_json::Value) -> Vec<LimitWindow> {
     let mut out = Vec::new();
-    let Some(groups) = v.pointer("/response/groups").and_then(|g| g.as_array()) else { return out };
+    let Some(groups) = v.pointer("/response/groups").and_then(|g| g.as_array()) else {
+        return out;
+    };
     for g in groups {
         let gname = g.get("displayName").and_then(|x| x.as_str());
-        let Some(buckets) = g.get("buckets").and_then(|b| b.as_array()) else { continue };
+        let Some(buckets) = g.get("buckets").and_then(|b| b.as_array()) else {
+            continue;
+        };
         for b in buckets {
-            let Some(rem) = b.get("remainingFraction").and_then(|x| x.as_f64()) else { continue };
+            let Some(rem) = b.get("remainingFraction").and_then(|x| x.as_f64()) else {
+                continue;
+            };
             if !(0.0..=1.0).contains(&rem) {
                 continue;
             }
             let bname = b.get("displayName").and_then(|x| x.as_str());
-            let id = b.get("bucketId").and_then(|x| x.as_str()).or(gname).unwrap_or("quota").to_string();
+            let id = b
+                .get("bucketId")
+                .and_then(|x| x.as_str())
+                .or(gname)
+                .unwrap_or("quota")
+                .to_string();
             out.push(LimitWindow {
-                label: lane_name(&id).or(gname).or(bname).unwrap_or("Usage").to_string(),
+                label: lane_name(&id)
+                    .or(gname)
+                    .or(bname)
+                    .unwrap_or("Usage")
+                    .to_string(),
                 group: gname.map(String::from),
                 id,
                 used: (1.0 - rem).clamp(0.0, 1.0),
@@ -348,17 +386,25 @@ struct Creds {
     access_token: String,
     expired: bool,
     auth_method: String,
+    expiry_ms: Option<u64>,
 }
 
 /// Windows Credential Manager: generic credential with target = "gemini:antigravity" (Go keyring's service:user naming)
 #[cfg(windows)]
 fn read_credential_raw() -> Option<Vec<u8>> {
     use windows::core::PCWSTR;
-    use windows::Win32::Security::Credentials::{CredFree, CredReadW, CREDENTIALW, CRED_TYPE_GENERIC};
-    let target: Vec<u16> = "gemini:antigravity".encode_utf16().chain(std::iter::once(0)).collect();
+    use windows::Win32::Security::Credentials::{
+        CredFree, CredReadW, CREDENTIALW, CRED_TYPE_GENERIC,
+    };
+    let target: Vec<u16> = "gemini:antigravity"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
     let mut pcred: *mut CREDENTIALW = std::ptr::null_mut();
     unsafe {
-        if CredReadW(PCWSTR(target.as_ptr()), CRED_TYPE_GENERIC, 0, &mut pcred).is_err() || pcred.is_null() {
+        if CredReadW(PCWSTR(target.as_ptr()), CRED_TYPE_GENERIC, 0, &mut pcred).is_err()
+            || pcred.is_null()
+        {
             return None;
         }
         let c = &*pcred;
@@ -382,24 +428,56 @@ fn read_credential_raw() -> Option<Vec<u8>> {
 
 /// Raw JSON, or base64 with a `go-keyring-base64:` prefix (UTF-16 storage is accepted too)
 fn decode_credential(raw: &[u8]) -> Option<Creds> {
-    let mut text = String::from_utf8(raw.to_vec()).unwrap_or_else(|_| {
-        // Some writers store the blob as UTF-16LE
-        let u16s: Vec<u16> = raw.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
-        String::from_utf16_lossy(&u16s)
-    });
+    // UTF-16LE is sometimes technically valid UTF-8 with embedded NULs.
+    let mut text = if raw.len() >= 4 && raw.iter().skip(1).step_by(2).all(|b| *b == 0) {
+        let u16s: Vec<u16> = raw
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        String::from_utf16(&u16s).ok()?
+    } else {
+        String::from_utf8(raw.to_vec()).ok()?
+    };
     text = text.trim_matches('\0').trim().to_string();
     if let Some(rest) = text.strip_prefix("go-keyring-base64:") {
         let bytes = b64_decode(rest.trim())?;
         text = String::from_utf8(bytes).ok()?;
+    } else if !text.starts_with('{') {
+        text = String::from_utf8(b64_decode(&text)?).ok()?;
     }
     let v: serde_json::Value = serde_json::from_str(&text).ok()?;
-    let access = v.pointer("/token/access_token")?.as_str()?.to_string();
-    let expiry = v.pointer("/token/expiry").and_then(|x| x.as_str()).unwrap_or("");
-    let expired = chrono::DateTime::parse_from_rfc3339(expiry)
-        .map(|d| (d.timestamp_millis().max(0) as u64) <= now_ms())
-        .unwrap_or(false);
-    let auth_method = v.get("auth_method").and_then(|x| x.as_str()).unwrap_or("").to_string();
-    Some(Creds { access_token: access, expired, auth_method })
+    let access = v
+        .pointer("/token/access_token")
+        .or_else(|| v.get("access_token"))
+        .or_else(|| v.get("access"))?
+        .as_str()?
+        .trim()
+        .to_string();
+    if access.is_empty() {
+        return None;
+    }
+    let expiry_ms = v
+        .get("expiry_date")
+        .or_else(|| v.get("expires"))
+        .and_then(|x| x.as_u64())
+        .or_else(|| {
+            v.pointer("/token/expiry")
+                .and_then(|x| x.as_str())
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|d| d.timestamp_millis().max(0) as u64)
+        });
+    let expired = expiry_ms.is_some_and(|ms| ms <= now_ms());
+    let auth_method = v
+        .get("auth_method")
+        .and_then(|x| x.as_str())
+        .unwrap_or("consumer")
+        .to_string();
+    Some(Creds {
+        access_token: access,
+        expired,
+        auth_method,
+        expiry_ms,
+    })
 }
 
 /// Dependency-free base64 (standard alphabet, tolerant of URL-safe characters and missing padding)
@@ -429,12 +507,68 @@ pub(crate) fn b64_decode(s: &str) -> Option<Vec<u8>> {
 }
 
 fn read_credentials() -> Option<Creds> {
-    decode_credential(&read_credential_raw()?)
+    if let Some(profile) = crate::accounts::active("antigravity") {
+        if let Some(secret) = crate::accounts::secret("antigravity") {
+            return decode_credential(secret.as_bytes());
+        }
+        // The system keyring and running IDE are a different login and cannot
+        // substitute for an explicitly selected saved account.
+        let path = profile
+            .credential_path
+            .unwrap_or_else(|| profile.root.join("oauth_creds.json"));
+        return std::fs::read(path)
+            .ok()
+            .and_then(|raw| decode_credential(&raw));
+    }
+    read_external_credentials()
+}
+
+fn read_external_credentials() -> Option<Creds> {
+    let keyring = read_credential_raw().and_then(|raw| decode_credential(&raw));
+    if keyring.as_ref().is_some_and(|c| !c.expired) {
+        return keyring;
+    }
+    let Some(home) = dirs::home_dir() else {
+        return keyring;
+    };
+    let file = std::fs::read(home.join(".gemini").join("oauth_creds.json"))
+        .ok()
+        .and_then(|raw| decode_credential(&raw));
+    if file.as_ref().is_some_and(|c| !c.expired) {
+        return file;
+    }
+    let omp = read_omp_credential(&home.join(".omp").join("agent").join("agent.db"));
+    if omp.as_ref().is_some_and(|c| !c.expired) {
+        return omp;
+    }
+    keyring.or(file).or(omp)
+}
+
+fn read_omp_credential(path: &Path) -> Option<Creds> {
+    let conn = rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+    let raw: String = conn.query_row("SELECT data FROM auth_credentials WHERE provider = 'google-antigravity' ORDER BY updated_at DESC LIMIT 1", [], |r| r.get(0)).ok()?;
+    decode_credential(raw.as_bytes())
+}
+
+/// Native-only capture; the registry encrypts the token with Windows DPAPI.
+pub(crate) fn capture_current_credential() -> Option<String> {
+    let c = read_external_credentials()?;
+    Some(
+        serde_json::json!({"access_token": c.access_token,
+        "auth_method": c.auth_method, "expiry_date": c.expiry_ms})
+        .to_string(),
+    )
 }
 
 /// Tier name ("Personal"/"Pro"…); 401/403 → NeedsAuth
 fn load_tier(token: &str) -> Result<String, String> {
-    let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(15)).build();
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(15))
+        .build();
     match agent
         .post(LOAD_CODE_ASSIST)
         .set("Authorization", &format!("Bearer {token}"))
@@ -446,16 +580,24 @@ fn load_tier(token: &str) -> Result<String, String> {
             let tier = v
                 .get("currentTier")
                 .or_else(|| {
-                    v.get("allowedTiers").and_then(|a| a.as_array()).and_then(|a| {
-                        a.iter().find(|t| t.get("isDefault").and_then(|x| x.as_bool()) == Some(true)).or(a.first())
-                    })
+                    v.get("allowedTiers")
+                        .and_then(|a| a.as_array())
+                        .and_then(|a| {
+                            a.iter()
+                                .find(|t| {
+                                    t.get("isDefault").and_then(|x| x.as_bool()) == Some(true)
+                                })
+                                .or(a.first())
+                        })
                 })
                 .and_then(|t| t.get("name"))
                 .and_then(|x| x.as_str())
                 .unwrap_or("Gemini");
             Ok(tier.to_string())
         }
-        Err(ureq::Error::Status(401, _)) | Err(ureq::Error::Status(403, _)) => Err("needsAuth".into()),
+        Err(ureq::Error::Status(401, _)) | Err(ureq::Error::Status(403, _)) => {
+            Err("needsAuth".into())
+        }
         Err(ureq::Error::Status(code, _)) => Err(format!("HTTP {code}")),
         Err(e) => Err(e.to_string()),
     }
@@ -463,7 +605,9 @@ fn load_tier(token: &str) -> Result<String, String> {
 
 /// Direct quota for licensed accounts; a personal account gets 403 → None (not an error)
 fn direct_quota(token: &str) -> Option<Vec<LimitWindow>> {
-    let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(15)).build();
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(15))
+        .build();
     let r = agent
         .post(QUOTA_SUMMARY)
         .set("Authorization", &format!("Bearer {token}"))
@@ -497,7 +641,11 @@ fn direct_quota(token: &str) -> Option<Vec<LimitWindow>> {
                 .unwrap_or("Usage")
                 .to_string();
             Some(LimitWindow {
-                id: b.get("name").and_then(|x| x.as_str()).unwrap_or(&label).to_string(),
+                id: b
+                    .get("name")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or(&label)
+                    .to_string(),
                 label,
                 used: (used / limit).clamp(0.0, 1.0),
                 resets_at: parse_iso(b.get("resetTime")),
@@ -523,19 +671,35 @@ fn requests_in(roots: &[PathBuf], today: chrono::NaiveDate) -> (u64, Option<u64>
     use chrono::{Local, TimeZone};
     let mut count = 0u64;
     let mut latest: Option<u64> = None;
-    for e in roots.iter().filter_map(|r| std::fs::read_dir(r.join("brain")).ok()).flat_map(|rd| rd.flatten()) {
-        let p = e.path().join(".system_generated").join("logs").join("transcript.jsonl");
-        let Ok(text) = std::fs::read_to_string(&p) else { continue };
+    for e in roots
+        .iter()
+        .filter_map(|r| std::fs::read_dir(r.join("brain")).ok())
+        .flat_map(|rd| rd.flatten())
+    {
+        let p = e
+            .path()
+            .join(".system_generated")
+            .join("logs")
+            .join("transcript.jsonl");
+        let Ok(text) = std::fs::read_to_string(&p) else {
+            continue;
+        };
         for line in text.lines() {
             if !line.contains("\"MODEL\"") {
                 continue;
             }
-            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
             if v.get("source").and_then(|x| x.as_str()) != Some("MODEL") {
                 continue;
             }
-            let Some(ts) = v.get("created_at").and_then(|x| x.as_str()) else { continue };
-            let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts) else { continue };
+            let Some(ts) = v.get("created_at").and_then(|x| x.as_str()) else {
+                continue;
+            };
+            let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts) else {
+                continue;
+            };
             let ms = dt.timestamp_millis().max(0) as u64;
             latest = Some(latest.map_or(ms, |l| l.max(ms)));
             let local = Local.timestamp_millis_opt(ms as i64).single();
@@ -556,8 +720,18 @@ struct Runtime {
     ever_bridged: bool,
 }
 
-fn read_once(rt: &mut Runtime, prev: &UsageSnapshot) -> UsageSnapshot {
+fn read_once(
+    rt: &mut Runtime,
+    prev: &UsageSnapshot,
+    captured: Option<Creds>,
+    external: bool,
+    roots: &[PathBuf],
+) -> UsageSnapshot {
     let mut snap = UsageSnapshot::default();
+    if !external {
+        rt.endpoint = None;
+        rt.ever_bridged = false;
+    }
     // 1. Local bridge (the cached endpoint first; the port changes on every launch, so a miss is normal)
     let mut bridge_err = String::new();
     let mut tried = false;
@@ -578,7 +752,7 @@ fn read_once(rt: &mut Runtime, prev: &UsageSnapshot) -> UsageSnapshot {
             }
         }
     }
-    if let Some(ep) = discover() {
+    if let Some(ep) = external.then(discover).flatten() {
         tried = true;
         match bridge_quota(&ep) {
             Ok(w) => {
@@ -605,7 +779,7 @@ fn read_once(rt: &mut Runtime, prev: &UsageSnapshot) -> UsageSnapshot {
     }
     // 3. Credential path
     let mut tier: Option<String> = None;
-    match read_credentials() {
+    match captured {
         Some(c) if !c.expired => match load_tier(&c.access_token) {
             Ok(t) => {
                 tier = Some(t);
@@ -619,19 +793,46 @@ fn read_once(rt: &mut Runtime, prev: &UsageSnapshot) -> UsageSnapshot {
             }
             Err(e) if e == "needsAuth" => {
                 snap.status = "needsAuth".into();
-                snap.note = "Antigravity's Google session was rejected — sign in again in Antigravity".into();
+                snap.note =
+                    "Antigravity's Google session was rejected — sign in again in Antigravity"
+                        .into();
                 return snap;
             }
             Err(e) => crate::applog(&format!("antigravity: loadCodeAssist {e}")),
         },
+        Some(_) if !external => {
+            snap.status = "needsAuth".into();
+            snap.note =
+                "Saved Antigravity login has expired; sign in again and import the renewed login."
+                    .into();
+            return snap;
+        }
         Some(c) => {
             // Expired ≠ signed out: Antigravity refreshes it on its next run; auth_method stands in for the tier
-            tier = Some(if c.auth_method == "consumer" { "Personal".into() } else { c.auth_method.clone() });
+            tier = Some(if c.auth_method == "consumer" {
+                "Personal".into()
+            } else {
+                c.auth_method.clone()
+            });
+        }
+        None if !external => {
+            snap.status = "needsAuth".into();
+            snap.note = "Sign in to Antigravity, then import that login in Accounts.".into();
+            return snap;
         }
         None => {}
     }
+    if !external {
+        snap.status = "none".into();
+        snap.note = if tier.is_some() {
+            "Saved Antigravity login verified; the quota endpoint is unavailable for this account. Use its matching Antigravity session to read quota.".into()
+        } else {
+            "Unable to verify the saved Antigravity login right now; retry the refresh.".into()
+        };
+        return snap;
+    }
     // 4. Count fallback (derived: the card gets a ~ prefix and the ring draws only its track)
-    let (n, latest) = requests_today();
+    let (n, latest) = requests_in(roots, chrono::Local::now().date_naive());
     snap.status = "ok".into();
     snap.fetched_at = latest.unwrap_or_else(now_ms);
     snap.windows = vec![LimitWindow {
@@ -650,117 +851,75 @@ fn read_once(rt: &mut Runtime, prev: &UsageSnapshot) -> UsageSnapshot {
     snap
 }
 
-fn broadcast(app: &AppHandle, snap: UsageSnapshot) {
-    let st = app.state::<AppState>();
-    *st.antigravity.lock().unwrap() = snap.clone();
-    persist(&snap);
-    let _ = app.emit("antigravity", &snap);
-}
-
-fn sleep_interruptible(secs: u64) {
-    for _ in 0..secs {
-        if REFRESH_LEGACY.swap(false, std::sync::atomic::Ordering::Relaxed) {
-            return;
-        }
-        std::thread::sleep(Duration::from_secs(1));
-    }
+fn broadcast(app: &AppHandle, snap: UsageSnapshot, selection: &str) {
+    let _ = crate::accounts::with_selection("antigravity", selection, || {
+        let st = app.state::<AppState>();
+        *st.antigravity.lock().unwrap() = snap.clone();
+        let _ = app.emit("antigravity", &snap);
+    });
 }
 
 pub fn start(app: AppHandle) {
-    if crate::agy_cli::find_agy().is_some() {
-        start_cli(app);
-    } else {
-        start_legacy(app);
-    }
-}
-
-fn start_cli(app: AppHandle) {
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     *REFRESH_CLI.lock().unwrap() = Some(sender);
-
     std::thread::spawn(move || {
-        {
-            let st = app.state::<AppState>();
-            let snap = st.antigravity.lock().unwrap().clone();
-            let _ = app.emit("antigravity", &snap);
-        }
-
-        let mut last_attempt: Option<Instant> = None;
-
-        while receiver.recv().is_ok() {
-            if last_attempt.is_some_and(|last| last.elapsed() < CLI_TTL) {
-                continue;
-            }
-            let st = app.state::<AppState>();
-            let previous = st.antigravity.lock().unwrap().clone();
-            if !previous.windows.is_empty()
-                && now_ms().saturating_sub(previous.fetched_at) < CLI_TTL.as_millis() as u64
-            {
-                continue;
-            }
-            last_attempt = Some(Instant::now());
-
-            let snap = match crate::agy_cli::read_quota() {
-                Ok(windows) => UsageSnapshot {
-                    status: "ok".into(),
-                    windows,
-                    fetched_at: now_ms(),
-                    note: "via Antigravity CLI".into(),
-                    ..Default::default()
-                },
-                Err(error) => UsageSnapshot {
-                    status: if previous.windows.is_empty() {
-                        "error".into()
-                    } else {
-                        "stale".into()
-                    },
-                    note: format!(
-                        "via Antigravity CLI — {error}.{}",
-                        if previous.windows.is_empty() {
-                            ""
-                        } else {
-                            " Last reading kept."
-                        }
-                    ),
-                    ..previous
-                },
-            };
-
-            *st.antigravity.lock().unwrap() = snap.clone();
-            persist(&snap);
-            let _ = app.emit("antigravity", &snap);
-        }
-    });
-
-    request_refresh();
-}
-
-fn start_legacy(app: AppHandle) {
-    std::thread::spawn(move || {
-        {
-            let st = app.state::<AppState>();
-            let snap = st.antigravity.lock().unwrap().clone();
-            let _ = app.emit("antigravity", &snap);
-        }
-        if !legacy_present() {
-            broadcast(&app, UsageSnapshot { status: "absent".into(), ..Default::default() });
-            loop {
-                sleep_interruptible(600);
-                if legacy_present() {
-                    break;
-                }
-            }
-        }
-        let mut rt = Runtime { endpoint: None, ever_bridged: false };
+        let mut runtimes = std::collections::HashMap::<String, Runtime>::new();
         loop {
-            let prev = {
-                let st = app.state::<AppState>();
-                let s = st.antigravity.lock().unwrap().clone();
-                s
+            let selection = crate::accounts::selection_key("antigravity");
+            let Some((previous, cache, captured, external, roots, installed)) =
+                crate::accounts::with_selection("antigravity", &selection, || {
+                    (
+                        load_persisted(),
+                        store_path(),
+                        read_credentials(),
+                        crate::accounts::active("antigravity").is_none(),
+                        state_roots(),
+                        present(),
+                    )
+                })
+            else {
+                continue;
             };
-            let snap = read_once(&mut rt, &prev);
-            broadcast(&app, snap);
-            sleep_interruptible(POLL_SECS);
+            let rt = runtimes.entry(selection.clone()).or_insert(Runtime {
+                endpoint: None,
+                ever_bridged: false,
+            });
+            let snap = if !installed {
+                UsageSnapshot {
+                    status: "absent".into(),
+                    ..Default::default()
+                }
+            } else if external && discover().is_some() {
+                // Prefer the active signed-in IDE over an installed CLI that
+                // might not have completed its own separate sign-in.
+                read_once(rt, &previous, captured, external, &roots)
+            } else if external && crate::agy_cli::find_agy().is_some() {
+                match crate::agy_cli::read_quota() {
+                    Ok(windows) => UsageSnapshot {
+                        status: "ok".into(),
+                        windows,
+                        fetched_at: now_ms(),
+                        note: "via Antigravity CLI".into(),
+                        ..Default::default()
+                    },
+                    // Installation does not imply CLI authentication. The IDE
+                    // can already be signed in while the CLI is not.
+                    Err(_) => read_once(rt, &previous, captured, external, &roots),
+                }
+            } else {
+                read_once(rt, &previous, captured, external, &roots)
+            };
+            if crate::accounts::with_selection("antigravity", &selection, || {
+                crate::agy_cli::save_persisted_to(&cache, &snap)
+            })
+            .is_none()
+            {
+                crate::accounts::preserve_backoff(&cache, snap.backoff_until);
+            }
+            broadcast(&app, snap, &selection);
+            // Selection and explicit refresh wake immediately. Ordinary vendor
+            // polling remains bounded and hover reads the fresh local cache.
+            let _ = receiver.recv_timeout(Duration::from_secs(POLL_SECS));
         }
     });
 }
@@ -798,13 +957,50 @@ fn legacy_probe() -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn windows_credential_shapes_preserve_tokens_and_expiry() {
+        let raw = r#"{"auth_method":"consumer","token":{"access_token":"synthetic-google","expiry":"2999-01-01T00:00:00Z"}}"#;
+        let utf16: Vec<u8> = raw.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let c = super::decode_credential(&utf16).unwrap();
+        assert_eq!(c.access_token, "synthetic-google");
+        assert!(!c.expired);
+        assert!(
+            super::decode_credential(br#"{"access_token":"expired","expiry_date":1}"#)
+                .unwrap()
+                .expired
+        );
+        assert!(super::decode_credential(br#"{"access_token":""}"#).is_none());
+        let unprefixed = "eyJhY2Nlc3NfdG9rZW4iOiJzeW50aGV0aWMifQ==";
+        assert_eq!(
+            super::decode_credential(unprefixed.as_bytes())
+                .unwrap()
+                .access_token,
+            "synthetic"
+        );
+    }
+
+    #[test]
+    fn language_server_detection_excludes_other_editors() {
+        assert!(super::antigravity_process(
+            r"C:\Antigravity\language_server_windows_x64.exe --csrf_token synthetic"
+        ));
+        assert!(!super::antigravity_process(
+            r"C:\Windsurf\language_server_windows_x64.exe --csrf_token synthetic"
+        ));
+        assert!(!super::antigravity_process(
+            r"C:\Antigravity\language_server_windows_x64.exe"
+        ));
+    }
+
     use super::{requests_in, state_roots_in};
     use std::path::{Path, PathBuf};
 
     struct Home(PathBuf);
     impl Home {
         fn new(name: &str) -> Self {
-            let p = std::env::temp_dir().join(format!("codenotch-ag-{}-{name}", std::process::id()));
+            let p =
+                std::env::temp_dir().join(format!("codenotch-ag-{}-{name}", std::process::id()));
             let _ = std::fs::remove_dir_all(&p);
             std::fs::create_dir_all(p.join(".gemini")).unwrap();
             Home(p)
@@ -822,17 +1018,27 @@ mod tests {
     }
 
     fn names(roots: &[PathBuf]) -> Vec<String> {
-        roots.iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect()
+        roots
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect()
     }
 
     fn trajectory(root: &Path, id: &str, lines: &[String]) {
-        let logs = root.join("brain").join(id).join(".system_generated").join("logs");
+        let logs = root
+            .join("brain")
+            .join(id)
+            .join(".system_generated")
+            .join("logs");
         std::fs::create_dir_all(&logs).unwrap();
         std::fs::write(logs.join("transcript.jsonl"), lines.join("\n")).unwrap();
     }
 
     fn step(source: &str, at: chrono::DateTime<chrono::Utc>) -> String {
-        format!(r#"{{"source":"{source}","created_at":"{}"}}"#, at.to_rfc3339())
+        format!(
+            r#"{{"source":"{source}","created_at":"{}"}}"#,
+            at.to_rfc3339()
+        )
     }
 
     fn today() -> chrono::NaiveDate {
@@ -841,7 +1047,8 @@ mod tests {
 
     #[test]
     fn no_gemini_directory_means_no_roots() {
-        let missing = std::env::temp_dir().join(format!("codenotch-ag-{}-missing", std::process::id()));
+        let missing =
+            std::env::temp_dir().join(format!("codenotch-ag-{}-missing", std::process::id()));
         assert!(state_roots_in(&missing).is_empty());
     }
 
@@ -863,13 +1070,24 @@ mod tests {
     #[test]
     fn every_flavour_is_found_and_nothing_else() {
         let h = Home::new("all");
-        for f in ["antigravity-cli", "antigravity", "antigravity-ide", "antigravity-backup", "config"] {
+        for f in [
+            "antigravity-cli",
+            "antigravity",
+            "antigravity-ide",
+            "antigravity-backup",
+            "config",
+        ] {
             h.flavour(f);
         }
         std::fs::write(h.0.join(".gemini").join("antigravity-notes.txt"), "").unwrap();
         assert_eq!(
             names(&state_roots_in(&h.0)),
-            ["antigravity", "antigravity-backup", "antigravity-cli", "antigravity-ide"]
+            [
+                "antigravity",
+                "antigravity-backup",
+                "antigravity-cli",
+                "antigravity-ide"
+            ]
         );
     }
 
@@ -878,8 +1096,16 @@ mod tests {
         let h = Home::new("sum");
         let now = chrono::Utc::now();
         let old = now - chrono::TimeDelta::days(3);
-        trajectory(&h.flavour("antigravity-ide"), "a", &[step("MODEL", now), step("USER", now), step("MODEL", old)]);
-        trajectory(&h.flavour("antigravity-cli"), "b", &[step("MODEL", now), step("MODEL", now)]);
+        trajectory(
+            &h.flavour("antigravity-ide"),
+            "a",
+            &[step("MODEL", now), step("USER", now), step("MODEL", old)],
+        );
+        trajectory(
+            &h.flavour("antigravity-cli"),
+            "b",
+            &[step("MODEL", now), step("MODEL", now)],
+        );
         let (count, latest) = requests_in(&state_roots_in(&h.0), today());
         assert_eq!(count, 3);
         assert_eq!(latest, Some(now.timestamp_millis() as u64));
@@ -891,7 +1117,11 @@ mod tests {
         // antigravity-cli, so "the first that exists" read zero.
         let h = Home::new("trap");
         std::fs::create_dir_all(h.flavour("antigravity-ide").join("brain")).unwrap();
-        trajectory(&h.flavour("antigravity-cli"), "c", &[step("MODEL", chrono::Utc::now())]);
+        trajectory(
+            &h.flavour("antigravity-cli"),
+            "c",
+            &[step("MODEL", chrono::Utc::now())],
+        );
         assert_eq!(requests_in(&state_roots_in(&h.0), today()).0, 1);
     }
 

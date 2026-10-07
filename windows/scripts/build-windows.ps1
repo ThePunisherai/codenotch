@@ -35,7 +35,7 @@ try {
     Invoke-Checked -Command node -Arguments @('scripts/check-ui-scripts.mjs')
     Invoke-Checked -Command node -Arguments @('scripts/test-update-ui.cjs')
     Invoke-Checked -Command node -Arguments @('scripts/test-claude-auth-ui.cjs')
-    Invoke-Checked -Command node -Arguments @('--test', 'test-light-surface.cjs', 'test-carry.cjs', 'test-codex-headline.cjs', 'test-reset-card.cjs', 'test-reset-tracker.cjs', 'scripts/test-ko-i18n.cjs')
+    Invoke-Checked -Command node -Arguments @('--test', 'test-light-surface.cjs', 'test-carry.cjs', 'test-codex-headline.cjs', 'test-reset-card.cjs', 'test-reset-tracker.cjs', 'test-account-profiles.cjs', 'test-notch-accounts.cjs', 'scripts/test-ko-i18n.cjs')
     Invoke-Checked -Command cargo -Arguments @('test', '--release', '--locked')
 
     $originalRustFlags = $env:RUSTFLAGS
@@ -55,12 +55,13 @@ try {
         Pop-Location
     }
 
-    $installers = @(Get-ChildItem target/release/bundle/nsis/*-setup.exe)
-    if ($installers.Count -ne 1) {
-        throw "Expected one NSIS installer, found $($installers.Count)."
+    $packageVersion = (Get-Content codenotch/tauri.conf.json -Raw | ConvertFrom-Json).version
+    $installer = "target/release/bundle/nsis/Codenotch_${packageVersion}_x64-setup.exe"
+    if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) {
+        throw "The installer for version $packageVersion was not produced."
     }
     New-Item -ItemType Directory -Path $destination -Force | Out-Null
-    Copy-Item $installers[0].FullName (Join-Path $destination 'Codenotch-Setup.exe') -Force
+    Copy-Item -LiteralPath $installer -Destination (Join-Path $destination 'Codenotch-Setup.exe') -Force
 
     $portable = Join-Path $windowsRoot 'target/portable'
     New-Item -ItemType Directory -Path $portable -Force | Out-Null
@@ -75,6 +76,7 @@ try {
         'Use Codenotch-Setup.exe if WebView2 is not installed.'
         ''
         'Open Settings > Reset Tracker to see Codex reset announcements and your usage windows.'
+        'Open Settings > Accounts to connect and select separate provider profiles.'
         'Keep Codenotch running to receive reset notifications.'
     ) -join "`r`n" | Set-Content (Join-Path $portable 'README.txt') -Encoding utf8
     Compress-Archive -Path "$portable/*" -DestinationPath (Join-Path $destination 'Codenotch-Portable.zip') -Force
