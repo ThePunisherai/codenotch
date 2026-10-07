@@ -4,11 +4,13 @@
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
+    io::Read,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
         Mutex,
     },
+    time::SystemTime,
 };
 use tauri::{AppHandle, Emitter};
 
@@ -22,11 +24,13 @@ pub const PROVIDERS: [&str; 8] = [
     "glm",
     "opencode",
 ];
-static STORE: Mutex<()> = Mutex::new(());
+static STORE: Mutex<RegistryCache> = Mutex::new(RegistryCache { entry: None });
 // Separate from STORE: publication closures may read profiles/cache paths safely.
 static SELECTION: Mutex<()> = Mutex::new(());
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 const MAX_CREDENTIAL_BYTES: usize = 1024 * 1024;
+const MAX_REGISTRY_BYTES: u64 = 1024 * 1024;
+const MAX_ACCOUNTS_PER_PROVIDER: usize = 32;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -55,7 +59,7 @@ struct Record {
     source_key: Option<String>,
     created_at: u64,
 }
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 struct Registry {
     #[serde(skip)]
     broken: bool,
@@ -65,6 +69,155 @@ struct Registry {
     active: BTreeMap<String, String>,
     #[serde(default)]
     generation: BTreeMap<String, u64>,
+}
+
+/// Keep one small, nonsecret registry instead of parsing it on every account
+/// guard. Metadata is still checked on every read: external edits, replacement,
+/// deletion and unreadable settings must invalidate the account selection.
+struct RegistryCache {
+    entry: Option<CachedRegistry>,
+}
+struct CachedRegistry {
+    path: PathBuf,
+    stamp: RegistryStamp,
+    registry: Registry,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RegistryStamp {
+    Missing,
+    Unavailable,
+    File {
+        len: u64,
+        modified: SystemTime,
+        created: Option<SystemTime>,
+        #[cfg(unix)]
+        device: u64,
+        #[cfg(unix)]
+        inode: u64,
+        #[cfg(unix)]
+        changed: (i64, i64),
+        #[cfg(windows)]
+        identity: (u32, u64),
+        #[cfg(windows)]
+        changed: i64,
+    },
+}
+impl RegistryStamp {
+    fn read(path: &Path) -> Self {
+        #[cfg(windows)]
+        {
+            return Self::read_windows(path);
+        }
+        #[cfg(not(windows))]
+        match std::fs::metadata(path) {
+            Ok(meta) if meta.is_file() => {
+                let Ok(modified) = meta.modified() else {
+                    return Self::Unavailable;
+                };
+                #[cfg(unix)]
+                use std::os::unix::fs::MetadataExt;
+                Self::File {
+                    len: meta.len(),
+                    modified,
+                    created: meta.created().ok(),
+                    #[cfg(unix)]
+                    device: meta.dev(),
+                    #[cfg(unix)]
+                    inode: meta.ino(),
+                    #[cfg(unix)]
+                    changed: (meta.ctime(), meta.ctime_nsec()),
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::Missing,
+            _ => Self::Unavailable,
+        }
+    }
+    #[cfg(windows)]
+    fn read_windows(path: &Path) -> Self {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::{
+            Foundation::HANDLE,
+            Storage::FileSystem::{
+                FileBasicInfo, GetFileInformationByHandle, GetFileInformationByHandleEx,
+                BY_HANDLE_FILE_INFORMATION, FILE_BASIC_INFO,
+            },
+        };
+        // Read access is checked even on cache hits. A revoked ACL must fail
+        // closed, and the native file ID detects replacement with copied times.
+        let file = match std::fs::File::open(path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Self::Missing,
+            Err(_) => return Self::Unavailable,
+        };
+        let Ok(meta) = file.metadata() else {
+            return Self::Unavailable;
+        };
+        let Ok(modified) = meta.modified() else {
+            return Self::Unavailable;
+        };
+        if !meta.is_file() {
+            return Self::Unavailable;
+        }
+        let handle = HANDLE(file.as_raw_handle());
+        let mut identity = BY_HANDLE_FILE_INFORMATION::default();
+        let mut basic = FILE_BASIC_INFO::default();
+        unsafe {
+            if GetFileInformationByHandle(handle, &mut identity).is_err()
+                || GetFileInformationByHandleEx(
+                    handle,
+                    FileBasicInfo,
+                    (&mut basic as *mut FILE_BASIC_INFO).cast(),
+                    std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+                )
+                .is_err()
+            {
+                return Self::Unavailable;
+            }
+        }
+        Self::File {
+            len: meta.len(),
+            modified,
+            created: meta.created().ok(),
+            identity: (
+                identity.dwVolumeSerialNumber,
+                (identity.nFileIndexHigh as u64) << 32 | identity.nFileIndexLow as u64,
+            ),
+            changed: basic.ChangeTime,
+        }
+    }
+}
+impl RegistryCache {
+    fn read(&mut self, path: &Path) -> &Registry {
+        let stamp = RegistryStamp::read(path);
+        if !self.entry.as_ref().is_some_and(|entry| {
+            entry.path == path && entry.stamp == stamp && !entry.registry.broken
+        }) {
+            // If a file changes while being read, retry once. A moving or
+            // unreadable registry fails closed rather than borrowing a login.
+            let mut before = stamp;
+            let mut registry = unavailable_registry();
+            for _ in 0..2 {
+                registry = read_registry_file(path, &before);
+                let after = RegistryStamp::read(path);
+                if before == after {
+                    break;
+                }
+                before = after;
+                registry = unavailable_registry();
+            }
+            self.entry = Some(CachedRegistry {
+                path: path.to_owned(),
+                stamp: before,
+                registry,
+            });
+        }
+        &self.entry.as_ref().unwrap().registry
+    }
+    fn invalidate(&mut self) {
+        // Reload after a successful save rather than assuming another process
+        // could not have changed the file between our rename and metadata read.
+        self.entry = None;
+    }
 }
 #[derive(Clone, Serialize)]
 pub struct AccountView {
@@ -135,8 +288,17 @@ fn profile_root(provider: &str, id: &str) -> PathBuf {
 }
 fn sanitize(mut registry: Registry) -> Registry {
     let mut seen = std::collections::HashSet::new();
+    let mut counts = BTreeMap::<String, usize>::new();
     registry.accounts.retain(|r| {
-        PROVIDERS.contains(&r.provider.as_str()) && valid_id(&r.id) && seen.insert(r.id.clone())
+        if !PROVIDERS.contains(&r.provider.as_str())
+            || !valid_id(&r.id)
+            || !seen.insert(r.id.clone())
+        {
+            return false;
+        }
+        let count = counts.entry(r.provider.clone()).or_default();
+        *count += 1;
+        *count <= MAX_ACCOUNTS_PER_PROVIDER
     });
     registry.active.retain(|p, id| {
         registry
@@ -149,29 +311,47 @@ fn sanitize(mut registry: Registry) -> Registry {
         .retain(|p, _| PROVIDERS.contains(&p.as_str()));
     registry
 }
-fn read_registry() -> Registry {
-    match std::fs::read_to_string(registry_path()) {
-        Ok(text) => serde_json::from_str(&text)
-            .map(sanitize)
-            .unwrap_or_else(|_| Registry {
-                broken: true,
-                ..Default::default()
-            }),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Registry::default(),
-        Err(_) => Registry {
-            broken: true,
-            ..Default::default()
-        },
+fn unavailable_registry() -> Registry {
+    Registry {
+        broken: true,
+        ..Default::default()
     }
 }
-fn write_registry(registry: &Registry) -> Result<(), String> {
+fn read_registry_file(path: &Path, stamp: &RegistryStamp) -> Registry {
+    match stamp {
+        RegistryStamp::Missing => return Registry::default(),
+        RegistryStamp::File { len, .. } if *len <= MAX_REGISTRY_BYTES => {}
+        _ => return unavailable_registry(),
+    }
+    let Ok(file) = std::fs::File::open(path) else {
+        return unavailable_registry();
+    };
+    let mut bytes = Vec::new();
+    if file
+        .take(MAX_REGISTRY_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .is_err()
+        || bytes.len() as u64 > MAX_REGISTRY_BYTES
+    {
+        return unavailable_registry();
+    }
+    serde_json::from_slice(&bytes)
+        .map(sanitize)
+        .unwrap_or_else(|_| unavailable_registry())
+}
+fn read_registry(store: &mut RegistryCache) -> &Registry {
+    store.read(&registry_path())
+}
+fn write_registry(store: &mut RegistryCache, registry: &Registry) -> Result<(), String> {
     if registry.broken {
         return Err("Saved account settings could not be read. Existing profiles were preserved; restore accounts.json before changing accounts.".into());
     }
     private_dir(&base())?;
     let bytes =
         serde_json::to_vec_pretty(registry).map_err(|_| "Unable to save account settings.")?;
-    write_atomic(&registry_path(), &bytes)
+    write_atomic(&registry_path(), &bytes)?;
+    store.invalidate();
+    Ok(())
 }
 fn new_id() -> String {
     format!(
@@ -216,8 +396,8 @@ fn context(record: &Record) -> AccountContext {
 pub fn profile(provider: &str, account_id: &str) -> Option<AccountContext> {
     let provider = canonical_provider(provider);
     checked_provider(provider).ok()?;
-    let _lock = STORE.lock().unwrap_or_else(|e| e.into_inner());
-    let registry = read_registry();
+    let mut store = STORE.lock().unwrap_or_else(|e| e.into_inner());
+    let registry = read_registry(&mut store);
     registry
         .accounts
         .iter()
@@ -246,8 +426,8 @@ pub fn with_profile<T>(
 pub fn active(provider: &str) -> Option<AccountContext> {
     let provider = canonical_provider(provider);
     checked_provider(provider).ok()?;
-    let _lock = STORE.lock().unwrap_or_else(|e| e.into_inner());
-    let registry = read_registry();
+    let mut store = STORE.lock().unwrap_or_else(|e| e.into_inner());
+    let registry = read_registry(&mut store);
     if registry.broken {
         // An unreadable selected-profile registry must never fall back to a
         // different external app's login.
@@ -290,8 +470,8 @@ fn key_for(registry: &Registry, provider: &str) -> String {
 }
 pub fn selection_key(provider: &str) -> String {
     let provider = canonical_provider(provider);
-    let _lock = STORE.lock().unwrap_or_else(|e| e.into_inner());
-    let registry = read_registry();
+    let mut store = STORE.lock().unwrap_or_else(|e| e.into_inner());
+    let registry = read_registry(&mut store);
     key_for(&registry, provider)
 }
 pub fn with_selection<T>(provider: &str, expected: &str, f: impl FnOnce() -> T) -> Option<T> {
@@ -573,8 +753,8 @@ fn snapshot(registry: &Registry) -> AccountsSnapshot {
 }
 #[tauri::command]
 pub fn list_provider_accounts() -> AccountsSnapshot {
-    let _lock = STORE.lock().unwrap_or_else(|e| e.into_inner());
-    snapshot(&read_registry())
+    let mut store = STORE.lock().unwrap_or_else(|e| e.into_inner());
+    snapshot(read_registry(&mut store))
 }
 #[tauri::command]
 pub fn add_provider_account(
@@ -596,21 +776,21 @@ pub fn add_provider_account(
     };
     private_dir(&context(&record).root)?;
     let result = {
-        let _lock = STORE.lock().unwrap_or_else(|e| e.into_inner());
-        let mut registry = read_registry();
+        let mut store = STORE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut registry = read_registry(&mut store).clone();
         if registry
             .accounts
             .iter()
             .filter(|r| r.provider == provider)
             .count()
-            >= 32
+            >= MAX_ACCOUNTS_PER_PROVIDER
         {
             return Err("Maximum of 32 profiles per provider reached.".into());
         }
         registry.active.insert(provider.clone(), record.id.clone());
         registry.accounts.push(record.clone());
         bump(&mut registry, &provider);
-        write_registry(&registry)?;
+        write_registry(&mut store, &registry)?;
         view(&record, &registry)
     };
     changed(&app, &provider);
@@ -626,8 +806,8 @@ pub fn select_provider_account(
     checked_provider(&provider)?;
     let _gate = SELECTION.lock().unwrap_or_else(|e| e.into_inner());
     {
-        let _lock = STORE.lock().unwrap_or_else(|e| e.into_inner());
-        let mut registry = read_registry();
+        let mut store = STORE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut registry = read_registry(&mut store).clone();
         if !registry
             .accounts
             .iter()
@@ -637,7 +817,7 @@ pub fn select_provider_account(
         }
         registry.active.insert(provider.clone(), account_id);
         bump(&mut registry, &provider);
-        write_registry(&registry)?;
+        write_registry(&mut store, &registry)?;
     }
     changed(&app, &provider);
     Ok(list_provider_accounts())
@@ -655,8 +835,8 @@ pub fn remove_provider_account(
         return Err("Close or complete this account's sign-in window before removing it.".into());
     }
     let root = {
-        let _lock = STORE.lock().unwrap_or_else(|e| e.into_inner());
-        let mut registry = read_registry();
+        let mut store = STORE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut registry = read_registry(&mut store).clone();
         let index = registry
             .accounts
             .iter()
@@ -667,7 +847,7 @@ pub fn remove_provider_account(
             registry.active.remove(&provider);
         }
         bump(&mut registry, &provider);
-        write_registry(&registry)?;
+        write_registry(&mut store, &registry)?;
         root
     };
     // root is constructed from validated generated identifiers, never an IPC path.
@@ -846,17 +1026,19 @@ pub fn detect_provider_accounts(
     let _gate = SELECTION.lock().unwrap_or_else(|e| e.into_inner());
     let mut changed_providers = std::collections::BTreeSet::new();
     {
-        let _lock = STORE.lock().unwrap_or_else(|e| e.into_inner());
-        let mut registry = read_registry();
+        let mut store = STORE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut registry = read_registry(&mut store).clone();
         for (p, source, raw, name) in captures {
-            if registry.accounts.iter().filter(|r| r.provider == p).count() >= 32 {
+            if registry.accounts.iter().filter(|r| r.provider == p).count()
+                >= MAX_ACCOUNTS_PER_PROVIDER
+            {
                 continue;
             }
             if insert_import(&mut registry, &p, &source, &raw, name.as_deref())? {
                 changed_providers.insert(p);
             }
         }
-        write_registry(&registry)?;
+        write_registry(&mut store, &registry)?;
     }
     for p in changed_providers {
         changed(&app, &p);
@@ -890,10 +1072,10 @@ pub fn connect_provider_account(
     };
     invalidate_cache(&ctx.root, &provider)?;
     {
-        let _lock = STORE.lock().unwrap_or_else(|e| e.into_inner());
-        let mut registry = read_registry();
+        let mut store = STORE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut registry = read_registry(&mut store).clone();
         bump(&mut registry, &provider);
-        write_registry(&registry)?;
+        write_registry(&mut store, &registry)?;
     }
     save_secret_at(&ctx.root, &raw)?;
     // The caller gets no token echo, including on validation and native errors.
@@ -912,10 +1094,10 @@ pub fn save_profile_secret(
     let ctx = profile(provider, account_id).ok_or("Account profile no longer exists.")?;
     invalidate_cache(&ctx.root, provider)?;
     {
-        let _lock = STORE.lock().unwrap_or_else(|e| e.into_inner());
-        let mut registry = read_registry();
+        let mut store = STORE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut registry = read_registry(&mut store).clone();
         bump(&mut registry, provider);
-        write_registry(&registry)?;
+        write_registry(&mut store, &registry)?;
     }
     save_secret_at(&ctx.root, raw)?;
     if active(provider).is_some_and(|p| p.id == account_id) {
@@ -934,8 +1116,8 @@ pub fn login_finished(app: &AppHandle, provider: &str, account_id: &str) {
         }
     }
     {
-        let _lock = STORE.lock().unwrap_or_else(|e| e.into_inner());
-        let mut registry = read_registry();
+        let mut store = STORE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut registry = read_registry(&mut store).clone();
         if !registry
             .accounts
             .iter()
@@ -944,7 +1126,7 @@ pub fn login_finished(app: &AppHandle, provider: &str, account_id: &str) {
             return;
         }
         bump(&mut registry, provider);
-        let _ = write_registry(&registry);
+        let _ = write_registry(&mut store, &registry);
     }
     if active(provider).is_some_and(|p| p.id == account_id) {
         changed(app, provider);
@@ -1128,6 +1310,29 @@ fn unprotect(_: &[u8]) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    struct RegistryFixture(PathBuf);
+    impl RegistryFixture {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "codenotch-registry-cache-{}-{}",
+                std::process::id(),
+                new_id()
+            ));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+        fn path(&self) -> PathBuf {
+            self.0.join("accounts.json")
+        }
+        fn save(&self, registry: &Registry) {
+            write_atomic(&self.path(), &serde_json::to_vec(registry).unwrap()).unwrap();
+        }
+    }
+    impl Drop for RegistryFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
     fn record(id: &str, provider: &str) -> Record {
         Record {
             id: id.into(),
@@ -1197,6 +1402,80 @@ mod tests {
         bump(&mut r, "codex");
         assert_eq!(r.generation["codex"], 2);
         assert!(!r.generation.contains_key("claude"));
+    }
+    #[test]
+    fn cached_registry_detects_external_replacement_and_keeps_account_revisions() {
+        let fixture = RegistryFixture::new();
+        let mut registry = Registry::default();
+        registry.accounts = vec![record("p123", "codex"), record("p456", "codex")];
+        registry.active.insert("codex".into(), "p123".into());
+        fixture.save(&registry);
+        let mut cache = RegistryCache { entry: None };
+        let initial = key_for(cache.read(&fixture.path()), "codex");
+        for _ in 0..100 {
+            assert_eq!(key_for(cache.read(&fixture.path()), "codex"), initial);
+        }
+        registry.active.insert("codex".into(), "p456".into());
+        bump(&mut registry, "codex");
+        fixture.save(&registry);
+        assert_eq!(key_for(cache.read(&fixture.path()), "codex"), "p456:1");
+        registry.active.insert("codex".into(), "p123".into());
+        bump(&mut registry, "codex");
+        fixture.save(&registry);
+        assert_ne!(key_for(cache.read(&fixture.path()), "codex"), initial);
+    }
+    #[test]
+    fn corrupt_external_registry_fails_closed_and_recovers_when_repaired() {
+        let fixture = RegistryFixture::new();
+        let mut registry = Registry::default();
+        registry.accounts.push(record("p123", "codex"));
+        registry.active.insert("codex".into(), "p123".into());
+        fixture.save(&registry);
+        let mut cache = RegistryCache { entry: None };
+        assert_eq!(key_for(cache.read(&fixture.path()), "codex"), "p123:0");
+        write_atomic(&fixture.path(), b"{broken registry").unwrap();
+        assert_eq!(
+            key_for(cache.read(&fixture.path()), "codex"),
+            "registry-unavailable"
+        );
+        fixture.save(&registry);
+        assert_eq!(key_for(cache.read(&fixture.path()), "codex"), "p123:0");
+    }
+    #[test]
+    fn cached_registry_tracks_deletion_missing_file_creation_and_path_changes() {
+        let first = RegistryFixture::new();
+        let second = RegistryFixture::new();
+        let mut cache = RegistryCache { entry: None };
+        assert!(!cache.read(&first.path()).broken);
+        let mut registry = Registry::default();
+        registry.accounts.push(record("p123", "codex"));
+        registry.active.insert("codex".into(), "p123".into());
+        first.save(&registry);
+        assert_eq!(key_for(cache.read(&first.path()), "codex"), "p123:0");
+        assert_eq!(key_for(cache.read(&second.path()), "codex"), "external:0");
+        assert_eq!(key_for(cache.read(&first.path()), "codex"), "p123:0");
+        std::fs::remove_file(first.path()).unwrap();
+        assert_eq!(key_for(cache.read(&first.path()), "codex"), "external:0");
+    }
+    #[test]
+    fn registry_cache_bounds_file_size_and_profile_count_without_reading_credentials() {
+        let fixture = RegistryFixture::new();
+        let file = std::fs::File::create(fixture.path()).unwrap();
+        file.set_len(MAX_REGISTRY_BYTES + 1).unwrap();
+        let mut cache = RegistryCache { entry: None };
+        assert!(cache.read(&fixture.path()).broken);
+        let mut registry = Registry::default();
+        registry.accounts = (0..MAX_ACCOUNTS_PER_PROVIDER + 10)
+            .map(|i| record(&format!("p{:x}", i + 1), "codex"))
+            .collect();
+        fixture.save(&registry);
+        assert_eq!(
+            cache.read(&fixture.path()).accounts.len(),
+            MAX_ACCOUNTS_PER_PROVIDER
+        );
+        assert!(!serde_json::to_string(cache.read(&fixture.path()))
+            .unwrap()
+            .contains("access_token"));
     }
     #[test]
     #[cfg(windows)]

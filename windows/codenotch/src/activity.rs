@@ -30,6 +30,9 @@ use tauri::{AppHandle, Emitter, Manager};
 
 const INTERVAL: Duration = Duration::from_secs(2);
 const ANTIGRAVITY_STALE_MS: u64 = 45_000;
+// These long-lived read-only connections issue small, change-gated queries.
+// Bound each page-cache target instead of retaining SQLite's ~2 MiB default.
+const DB_CACHE_KIB: i32 = 256;
 
 #[derive(Clone, Serialize, Debug, PartialEq)]
 pub struct Activity {
@@ -143,7 +146,13 @@ fn open_ro(path: &std::path::Path) -> Option<rusqlite::Connection> {
     if !path.is_file() {
         return None;
     }
-    rusqlite::Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX).ok()
+    let connection = rusqlite::Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+    connection.pragma_update(None, "cache_size", -DB_CACHE_KIB).ok()?;
+    Some(connection)
 }
 
 fn cursor_activity(ctx: &mut Ctx) -> Vec<Activity> {
@@ -617,4 +626,54 @@ pub fn start(app: AppHandle) {
             std::thread::sleep(INTERVAL);
         }
     });
+}
+
+#[cfg(test)]
+mod memory_tests {
+    use super::*;
+
+    #[test]
+    fn small_read_only_page_cache_still_reads_live_wal_updates() {
+        let root = std::env::temp_dir().join(format!(
+            "codenotch-activity-cache-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("activity.sqlite");
+        {
+            let writer = rusqlite::Connection::open(&path).unwrap();
+            writer
+                .execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE readings(value TEXT); INSERT INTO readings VALUES ('busy');")
+                .unwrap();
+            let reader = open_ro(&path).unwrap();
+            let target: i32 = reader
+                .pragma_query_value(None, "cache_size", |row| row.get(0))
+                .unwrap();
+            assert_eq!(target, -DB_CACHE_KIB);
+            let read = || {
+                reader
+                    .query_row("SELECT value FROM readings", [], |row| row.get::<_, String>(0))
+                    .unwrap()
+            };
+            assert_eq!(read(), "busy");
+            writer
+                .execute("UPDATE readings SET value='waiting'", [])
+                .unwrap();
+            assert_eq!(read(), "waiting");
+            assert!(reader.execute("DELETE FROM readings", []).is_err());
+        }
+        let reopened = open_ro(&path).unwrap();
+        assert_eq!(
+            reopened
+                .pragma_query_value(None, "cache_size", |row| row.get::<_, i32>(0))
+                .unwrap(),
+            -DB_CACHE_KIB
+        );
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

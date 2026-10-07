@@ -28,11 +28,11 @@ fn open_now(app: &AppHandle) {
         let _ = w.set_focus();
         return;
     }
-    // The Mac's window: 680 × 520, centred, not resizable. `shadow` on an undecorated window is what
+    // Room for account actions and reset details: 740 × 560, centred, not resizable. `shadow` on an undecorated window is what
     // gives it Windows 11's rounded corners.
     let mut builder = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("settings.html".into()))
         .title("Codenotch Settings")
-        .inner_size(680.0, 520.0)
+        .inner_size(740.0, 560.0)
         .resizable(false)
         .maximizable(false)
         .decorations(false)

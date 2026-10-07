@@ -123,6 +123,10 @@ pub struct Config {
     /// leave the app running with no way to reach it.
     #[serde(default = "yes")]
     pub tray_visible: bool,
+    /// Install trusted signed releases automatically for installed copies. Portable builds only
+    /// check and offer downloads, because an installer cannot safely replace an arbitrary folder.
+    #[serde(default = "yes")]
+    pub auto_update: bool,
     /// Show a temporary card when any provider (Claude, Codex, Cursor, …) renews a used quota window.
     #[serde(default = "yes")]
     pub reset_notifications: bool,
@@ -317,6 +321,7 @@ impl Default for Config {
             global_reset_notifications: true,
             banked_reset_notifications: true,
             reset_notification_sound: true,
+            auto_update: true,
             adaptive_pill: false,
         }
     }
@@ -442,15 +447,17 @@ mod tests {
         assert!(old.global_reset_notifications);
         assert!(old.banked_reset_notifications);
         assert!(old.reset_notification_sound);
+        assert!(old.auto_update);
         assert!(!old.notch_visible);
         assert_eq!(old.theme, "light");
-        let chosen = Config { reset_notifications: false, global_reset_notifications: false, banked_reset_notifications: false, reset_notification_sound: false, ..old };
+        let chosen = Config { reset_notifications: false, global_reset_notifications: false, banked_reset_notifications: false, reset_notification_sound: false, auto_update: false, ..old };
         let saved = serde_json::to_string(&chosen).unwrap();
         let restored: Config = serde_json::from_str(&saved).unwrap();
         assert!(!restored.reset_notifications);
         assert!(!restored.global_reset_notifications);
         assert!(!restored.banked_reset_notifications);
         assert!(!restored.reset_notification_sound);
+        assert!(!restored.auto_update);
         assert!(!restored.notch_visible);
         assert_eq!(restored.theme, "light");
     }

@@ -10,9 +10,9 @@
      The panel is translucent so Mica shows through; without Mica, body.solid draws the same tones. */
   :root{
     --accent:#0a7aff; --on-accent:#ffffff;
-    --text:#f2f2f4; --text2:rgba(235,235,245,.62); --text3:rgba(235,235,245,.38);
-    --pane:rgba(255,255,255,.13); --side:rgba(0,0,0,.40); --group:rgba(255,255,255,.06);
-    --line:rgba(255,255,255,.08); --hi:rgba(255,255,255,.05); --sep:rgba(255,255,255,.08);
+    --text:#f3f5fa; --text2:rgba(230,234,244,.68); --text3:rgba(230,234,244,.42);
+    --pane:rgba(255,255,255,.08); --side:rgba(0,0,0,.34); --group:rgba(255,255,255,.045);
+    --line:rgba(230,234,244,.10); --hi:rgba(255,255,255,.045); --sep:rgba(230,234,244,.08);
     --seg-bg:rgba(255,255,255,.09); --hover:rgba(255,255,255,.06); --sel-soft:rgba(255,255,255,.08);
     --btn:rgba(255,255,255,.10); --btn-hover:rgba(255,255,255,.16);
     --danger-bg:rgba(255,99,99,.14); --danger:#ff8a8a;
@@ -30,8 +30,8 @@
   *{box-sizing:border-box}
   html,body{margin:0;height:100%;background:transparent;overflow:hidden;user-select:none}
   body{font:13.5px/1.35 "Segoe UI Variable Text","Segoe UI",system-ui,sans-serif;color:var(--text)}
-  body.solid{--pane:#3d3d40;--side:#1f2022;--group:#48484b;--hi:transparent;background:#2b2b2e}
-  :root[data-theme="light"] body.solid{--pane:#f0f0f2;--side:#e2e2e6;--group:#ffffff;background:#f0f0f2}
+  body.solid{--pane:#20232a;--side:#181a20;--group:#282c34;--hi:transparent;background:#20232a}
+  :root[data-theme="light"] body.solid{--pane:#f3f5f8;--side:#e9edf3;--group:#ffffff;background:#f3f5f8}
   :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
   button{font:inherit;color:inherit}
   html[lang="ko"] body{word-break:keep-all}
@@ -40,12 +40,12 @@
   #app{display:flex;height:100%;background:var(--pane)}
 
   /* ---- sidebar: a card inset from the window, as on the Mac ---- */
-  #side{width:196px;margin:4px;border-radius:14px;background:var(--side);border:1px solid var(--line);
+  #side{width:196px;margin:8px;border-radius:16px;background:var(--side);border:1px solid var(--line);
     box-shadow:inset 0 1px 0 var(--hi);display:flex;flex-direction:column;padding:0 8px 8px;flex:none}
-  #side .band{height:48px;flex:none}
+  #side .band{height:52px;flex:none}
   #side .grow{flex:1}
-  .row{position:relative;display:flex;align-items:center;gap:9px;width:100%;height:32px;padding:0 8px;margin-bottom:2px;
-    border:0;border-radius:8px;background:transparent;text-align:left;font-size:13.5px}
+  .row{position:relative;display:flex;align-items:center;gap:10px;width:100%;height:36px;padding:0 10px;margin-bottom:3px;
+    border:0;border-radius:9px;background:transparent;text-align:left;font-size:13.5px}
   .row:hover{background:var(--hover)}
   .row.sel{background:var(--sel-soft)}
   .row.sel::before{content:"";position:absolute;left:0;top:9px;bottom:9px;width:3px;border-radius:2px;background:var(--accent)}
@@ -59,23 +59,23 @@
 
   /* ---- pane ---- */
   #pane{flex:1;display:flex;flex-direction:column;min-width:0}
-  #head{height:52px;display:flex;align-items:center;padding-left:24px;position:relative;flex:none}
-  #head h1{font-size:22px;font-weight:600;margin:0}
+  #head{height:62px;display:flex;align-items:center;padding-left:24px;position:relative;flex:none}
+  #head h1{font-size:24px;font-weight:600;letter-spacing:-.55px;margin:0}
   #close{position:absolute;top:0;right:0;width:46px;height:34px;border:0;background:transparent;color:var(--text2);
     display:grid;place-items:center;border-top-right-radius:8px}
   #close svg{width:10px;height:10px;stroke:currentColor;stroke-width:1.2}
   #close:hover{background:#c42b1c;color:#fff}
   #strip{margin:0 20px 8px;padding:7px 10px;border-radius:8px;background:var(--danger-bg);color:var(--danger);font-size:12px;overflow-wrap:anywhere}
-  #body{flex:1;overflow:auto;padding:0 20px 20px;scrollbar-width:none}
+  #body{flex:1;overflow:auto;padding:0 24px 24px;scrollbar-width:none}
   #body::-webkit-scrollbar{display:none}
 
   .sec{font-size:13.5px;font-weight:600;margin:18px 12px 8px}
   .pane > .sec:first-child{margin-top:6px}
-  .group{background:var(--group);border:1px solid var(--line);border-radius:10px;box-shadow:inset 0 1px 0 var(--hi)}
+  .group{background:var(--group);border:1px solid var(--line);border-radius:12px;box-shadow:inset 0 1px 0 var(--hi)}
   .group + .group{margin-top:14px}
   .pane > .group:first-child{margin-top:6px}
   .group > * + *{border-top:1px solid var(--sep)}
-  .item{padding:9px 12px;min-height:40px;display:flex;align-items:center;justify-content:space-between;gap:12px}
+  .item{padding:11px 14px;min-height:44px;display:flex;align-items:center;justify-content:space-between;gap:12px}
   /* A segmented control that does not fit beside its label (three Russian options do not) moves under it,
      still on the right, rather than running out of the window */
   .item:has(> .seg){flex-wrap:wrap;row-gap:8px}
@@ -109,7 +109,7 @@
   .seg button:hover:not(.on):not(:disabled){background:var(--hover)}
   .seg button.on{background:var(--accent);color:var(--on-accent)}
   .seg button:disabled{opacity:.45}
-  .btn{border:0;background:var(--btn);font-size:13px;padding:5px 12px;border-radius:6px;flex:none}
+  .btn{border:1px solid var(--line);background:var(--btn);font-size:13px;padding:5px 12px;border-radius:7px;flex:none;cursor:pointer}
   .btn:hover{background:var(--btn-hover)}
   /* As wide as the Colour transition control above (--slider-w is measured from it), so they line up */
   .item.slider > .value{margin-left:auto;min-width:4ch;text-align:right;font-variant-numeric:tabular-nums}
@@ -200,18 +200,18 @@
   :root[data-theme="light"] .reset-event-kind[data-kind="banked"]{color:#6e45b5}
   #reset-history-filter{gap:0;flex-wrap:wrap}
   #reset-history-filter button{font-size:10px;padding:3px 8px}
-  .profiles-intro{margin:6px 0 14px;padding:14px;border:1px solid var(--line);border-radius:12px;background:linear-gradient(120deg,rgba(10,122,255,.1),var(--group))}
+  .profiles-intro{margin:6px 0 16px;padding:17px;border:1px solid var(--line);border-radius:14px;background:linear-gradient(120deg,rgba(10,122,255,.09),var(--group))}
   .profiles-intro h2{margin:0;font-size:17px;font-weight:600;letter-spacing:-.3px}
   .profiles-intro p{font-size:11px;color:var(--text2);line-height:1.5;margin:6px 0 10px}
   .profiles-toolbar{display:flex;gap:7px;align-items:center;flex-wrap:wrap}
   .profiles-toolbar .btn{font-size:11px}
   .profiles-toolbar .primary{background:var(--accent);color:var(--on-accent)}
-  .profile-provider{margin-bottom:10px;background:var(--group);border:1px solid var(--line);border-radius:11px;overflow:hidden}
-  .profile-provider-head{display:flex;align-items:center;justify-content:space-between;gap:7px;padding:11px 12px}
+  .profile-provider{margin-bottom:12px;background:var(--group);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  .profile-provider-head{display:flex;align-items:center;justify-content:space-between;gap:7px;padding:13px 14px}
   .profile-provider-title{display:flex;align-items:center;gap:8px;font-weight:600}
   .profile-provider-title .glyph{color:var(--text)}
   .profile-capability{font-size:9px;color:var(--text2);border:1px solid var(--line);padding:2px 5px;border-radius:4px}
-  .profile-account{padding:11px 12px;border-top:1px solid var(--line)}
+  .profile-account{padding:13px 14px;border-top:1px solid var(--line)}
   .profile-account.active{background:rgba(10,122,255,.045)}
   .profile-account-title{display:flex;align-items:center;gap:7px;font-size:12px;font-weight:600;min-width:0;overflow-wrap:anywhere}
   .profile-active{font-size:9px;font-weight:500;background:rgba(10,122,255,.12);color:var(--accent);border-radius:4px;padding:2px 5px;flex:none}
@@ -230,9 +230,9 @@
   .profile-empty{padding:0 12px 12px;color:var(--text2);font-size:11px}
   .profile-empty .link{font-size:11px}
   #profiles-message{font-size:11px;color:var(--text2);margin:8px 0 0;overflow-wrap:anywhere}
-  .profile-dialog{width:390px;max-width:calc(100vw - 40px);border:1px solid var(--line);border-radius:15px;padding:18px;background:#292a2e;color:var(--text);box-shadow:0 20px 80px rgba(0,0,0,.4)}
+  .profile-dialog{width:430px;max-width:calc(100vw - 40px);border:1px solid var(--line);border-radius:16px;padding:22px;background:#20232a;color:var(--text);box-shadow:0 12px 32px rgba(0,0,0,.28)}
   :root[data-theme="light"] .profile-dialog{background:#f8f8fa}
-  .profile-dialog::backdrop{background:rgba(0,0,0,.35);backdrop-filter:blur(3px)}
+  .profile-dialog::backdrop{background:rgba(0,0,0,.45)}
   .profile-dialog-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}
   .profile-dialog h2{margin:0;font-size:17px;font-weight:600}
   .profile-dialog label{display:block;font-size:12px;margin:11px 0 5px}
@@ -372,8 +372,10 @@
           <div class="item"><span>Open Codenotch at login</span><button class="switch" id="sw-autostart" role="switch" aria-checked="false" aria-label="Open Codenotch at login"></button></div>
           <div class="item cap">Codenotch opens by itself every time you sign in to this computer, and waits quietly in the background until a coding session starts. Turn it off and you have to open Codenotch yourself.</div>
           <div class="item"><span>Version</span><span class="value" id="about-version" data-dynamic>0.3.0</span></div>
+          <div class="item"><span>Automatic updates</span><button class="switch" id="sw-auto-update" role="switch" aria-label="Automatic updates" aria-checked="false" disabled></button></div>
+          <div class="item cap" id="cap-auto-update" data-dynamic>Reading update preferences…</div>
           <div class="item"><span>Updates</span><span class="value" id="update-status" data-dynamic></span><button class="btn" id="btn-update" data-dynamic>Check for updates</button></div>
-          <div class="item cap">Codenotch checks for new Windows releases shortly after it starts. Signed updates install here; otherwise download and run the official installer from GitHub.</div>
+          <div class="item cap">With automatic updates on, Codenotch checks for new releases after startup and in the background. Verified updates install here; the portable edition opens the installer download.</div>
         </div>
         <div class="sec">Notifications</div>
         <div class="group">
@@ -2072,6 +2074,7 @@ document.getElementById('author').addEventListener('click', () => {
    zero never confirms a reset; only a new account reading can do that. External strings are placed
    with textContent, and the source button opens a fixed, Rust-validated destination. */
 let globalResetState = null, codexResetState = null, globalResetBusy = false, globalResetRevision = 0, codexResetRevision = 0, resetHistoryFilter = 'all', lastGlobalResetRequest = 0;
+let personalResetClocks = [];
 const resetNode = id => document.getElementById(id);
 const validResetTime = ms => typeof ms === 'number' && Number.isFinite(ms) && ms > 0 && ms <= 8640000000000000;
 function resetDate(ms){
@@ -2129,6 +2132,7 @@ function appendResetText(parent, tag, className, text){
 function renderPersonalResets(now){
   const holder = resetNode('reset-personal-windows');
   holder.replaceChildren();
+  personalResetClocks = [];
   const state = codexResetState || {};
   const windows = Array.isArray(state.windows) ? state.windows.filter(w => w && typeof w.label === 'string').slice(0, 4) : [];
   if(!windows.length){
@@ -2144,6 +2148,7 @@ function renderPersonalResets(now){
     appendResetText(name, 'span', 'reset-personal-percent', used === null ? '—' : Math.round(used * 100) + '% ' + ui('used', 'used'));
     card.appendChild(name);
     const countdown = appendResetText(card, 'div', 'reset-countdown', resetCountdown(w.resets_at, now));
+    personalResetClocks.push({node:countdown, resets_at:w.resets_at});
     if(!validResetTime(w.resets_at) || w.resets_at <= now) countdown.classList.add('waiting');
     const meter = document.createElement('div'); meter.className = 'reset-meter'; meter.setAttribute('aria-hidden', 'true');
     const fill = document.createElement('span'); fill.style.width = used === null ? '0%' : (used * 100) + '%';
@@ -2151,13 +2156,21 @@ function renderPersonalResets(now){
     appendResetText(card, 'div', 'reset-personal-time', resetDate(w.resets_at) || ui('Reset time not reported', 'Reset time not reported'));
     holder.appendChild(card);
   }
-  const reading = state.fetched_at ? ui('Account updated', 'Account updated') + ' ' + resetAgo(state.fetched_at, now) + '. ' : '';
-  const fresh = state.status === 'ok' && validResetTime(state.fetched_at) && state.fetched_at <= now + 60000 && now - state.fetched_at <= 300000;
-  const freshness = fresh ? '' : windows.length ? ui('Last known reading. ', 'Last known reading. ') : '';
-  resetNode('reset-personal-note').textContent = freshness + reading
-    + ui('Personal windows renew on your own schedule.', 'Personal windows renew on your own schedule.');
+  renderPersonalResetNote(now);
   const profile = typeof activeProfileFor === 'function' ? activeProfileFor('codex') : null;
   resetNode('reset-personal-profile').textContent = profile ? String(profile.label || 'Account').slice(0,60) : ui('Personal','Personal');
+}
+function resetClockText(node, text){
+  if(node.textContent !== text) node.textContent = text;
+}
+function renderPersonalResetNote(now){
+  const state = codexResetState || {};
+  const hasWindows = Array.isArray(state.windows) && state.windows.some(w => w && typeof w.label === 'string');
+  const reading = state.fetched_at ? ui('Account updated', 'Account updated') + ' ' + resetAgo(state.fetched_at, now) + '. ' : '';
+  const fresh = state.status === 'ok' && validResetTime(state.fetched_at) && state.fetched_at <= now + 60000 && now - state.fetched_at <= 300000;
+  const freshness = fresh ? '' : hasWindows ? ui('Last known reading. ', 'Last known reading. ') : '';
+  resetClockText(resetNode('reset-personal-note'), freshness + reading
+    + ui('Personal windows renew on your own schedule.', 'Personal windows renew on your own schedule.'));
 }
 function renderBankedReset(state){
   const event = state.banked;
@@ -2241,6 +2254,31 @@ function renderResetTracker(){
   renderBankedReset(state); renderResetServices(state);
   renderPersonalResets(now);
 }
+// The live tick changes text only. History, service chips and quota cards are rebuilt when data changes.
+function renderResetClock(now = Date.now()){
+  const state = globalResetState || {}, latest = state.last_reset;
+  const live = publicResetIsLive(state, now), checking = globalResetBusy || state.refreshing;
+  const sourceDelayed = state.status === 'ok' && ((state.feed && state.feed.stale)
+    || (validResetTime(state.source_expires_at) && state.source_expires_at <= now));
+  const status = live ? 'ok' : checking ? 'loading' : state.status === 'ok' ? 'stale' : state.status || 'loading';
+  const statusText = live ? checking ? 'LIVE · syncing' : 'LIVE' : sourceDelayed ? 'Source delayed'
+    : {stale:'Saved feed', offline:'Feed offline', loading:'Checking…'}[status] || 'Feed unavailable';
+  const feed = resetNode('reset-feed');
+  resetClockText(feed, ui(statusText, statusText));
+  if(feed.dataset.status !== status) feed.dataset.status = status;
+  resetClockText(resetNode('reset-latest-time'), latest && validResetTime(latest.announced_at)
+    ? resetDate(latest.announced_at) + ' · ' + resetAgo(latest.announced_at, now)
+    : ui('No confirmed announcement loaded yet', 'No confirmed announcement loaded yet'));
+  const checked = state.checked_at || state.fetched_at;
+  resetClockText(resetNode('reset-updated'), checked ? ui('Checked', 'Checked') + ' ' + resetCheckAgo(checked, now)
+    : ui('Waiting for first check', 'Waiting for first check'));
+  resetClockText(resetNode('reset-next-check'), checking ? ui('Checking now…', 'Checking now…') : resetCheckCountdown(state.next_check_at, now));
+  for(const clock of personalResetClocks){
+    resetClockText(clock.node, resetCountdown(clock.resets_at, now));
+    clock.node.classList.toggle('waiting', !validResetTime(clock.resets_at) || clock.resets_at <= now);
+  }
+  renderPersonalResetNote(now);
+}
 async function refreshResetTracker(){
   const revision = globalResetRevision;
   try {
@@ -2319,8 +2357,8 @@ try {
   })).catch(() => {});
 } catch(e) { /* State is also asked for when the window opens or gets focus. */ }
 setInterval(() => {
-  if(curTab !== 'resets')return;
-  renderResetTracker();
+  if(curTab !== 'resets' || document.hidden)return;
+  renderResetClock();
   if(globalResetState && !globalResetState.refreshing && validResetTime(globalResetState.next_check_at) && globalResetState.next_check_at<=Date.now())requestGlobalResetRefresh(true);
 },1000);
 
@@ -2330,13 +2368,22 @@ setInterval(() => {
    was asked for rather than interrupting anything. */
 const updBtn = document.getElementById('btn-update');
 const updStatus = document.getElementById('update-status');
+const updAuto = document.getElementById('sw-auto-update');
+const updAutoHelp = document.getElementById('cap-auto-update');
 /* The state arrives before the language does, so the row keeps it and is drawn again by renderAll */
 let updState = null;
 let updateEventSeen = false;
+let autoUpdateBusy = false;
 function renderUpdate(st){
   st = updState = st || {};
   const busy = !!(st.checking || st.installing);
   updBtn.disabled = busy;
+  drawSwitch(updAuto,{value:st.auto_update===true,busy:autoUpdateBusy || typeof st.auto_update!=='boolean'});
+  const autoHelp = st.auto_update===false ? 'Automatic updates are off. You can still check for updates manually.'
+    : st.portable ? 'Checks automatically. Download the installer when an update is available.'
+    : st.signing_ready ? 'Checks and installs verified updates in the background.'
+    : 'Checks automatically. New releases can be downloaded from the update button.';
+  updAutoHelp.textContent = ui(autoHelp,autoHelp);
   if(st.installing){ updStatus.textContent = ui('Installing…', 'Installing…'); updBtn.textContent = ui('Update', 'Update'); return; }
   if(st.checking){ updStatus.textContent = ui('Checking…', 'Checking…'); updBtn.textContent = ui('Check for updates', 'Check for updates'); return; }
   if(st.available){
@@ -2348,6 +2395,17 @@ function renderUpdate(st){
                         : st.checked ? ui('Up to date', 'Up to date') : '';
   updBtn.textContent = ui('Check for updates', 'Check for updates');
 }
+updAuto.addEventListener('click',async () => {
+  if(updAuto.disabled || autoUpdateBusy || !updState || typeof updState.auto_update!=='boolean')return;
+  const want=!updState.auto_update;autoUpdateBusy=true;renderUpdate(updState);
+  try{
+    const state=await invoke('set_auto_update',{on:want});
+    if(state && typeof state==='object')updState=state;
+    else if(typeof state==='boolean')updState={...updState,auto_update:state};
+    toast();
+  }catch(e){strip('Automatic updates could not be changed: '+errText(e));}
+  finally{autoUpdateBusy=false;renderUpdate(updState);}
+});
 updBtn.addEventListener('click', () => {
   const st = updState || {};
   const cmd = st.available ? (st.can_install ? 'install_update' : 'open_update_installer') : 'check_for_update';
