@@ -162,7 +162,7 @@ shows an error or the last reading marked stale. Profile connection uses the sup
 
 ## Install / build
 
-Download [`Codenotch-Setup.exe`](https://github.com/vinzdg/codenotch/releases/latest/download/Codenotch-Setup.exe)
+Download [`Codenotch-Setup.exe`](https://github.com/ThePunisherai/codenotch/releases/latest/download/Codenotch-Setup.exe)
 from the latest release. It installs for the current user without administrator rights, puts
 `codenotch-hook.exe` beside the app where **Install hooks** looks for it, and fetches WebView2 if
 Windows does not already have it. The installer is not code-signed, so SmartScreen stops it the
@@ -170,35 +170,44 @@ first time with *Windows protected your PC*: choose **More info**, then **Run an
 
 ### Updates
 
-Codenotch looks for a newer release about twenty seconds after it starts, and again whenever
-**Check for updates** is pressed in Settings → General. It compares the installed version with
-GitHub's latest release and confirms that release carries a Windows installer. When the maintainer
-has published a signed `latest.json` feed for that same version, **Update** downloads and installs
-it through Tauri. Otherwise **Download installer** opens the official GitHub asset for you to run.
+Codenotch checks about twenty seconds after launch and every six hours while **Automatic updates**
+is enabled in Settings → General. The preference is enabled by default and saved between launches.
+An installed copy downloads, verifies and installs a newer signed release in the background, then
+restarts. Turning automatic updates off stops scheduled checks; **Check for updates** still works.
+A preference disabled during download prevents automatic installation after verification.
 
-Nothing about this nags. A check that fails — no network or no Windows installer yet — leaves the
-app as it was and says so next to the version. Before the first completed check, the page makes
-no "Up to date" claim. There is no dialogue and no badge.
+Portable copies check on the same schedule, but use **Download installer** instead of automatic
+installation. Their `codenotch-portable.marker` protects the portable folder from an installer update.
+The 1.24 installer writes `.codenotch-installed` beside the executable. Copies without this marker,
+including older installations, are treated conservatively as portable: run the new setup once to
+enable automatic installation. Keep using the portable package if automatic checks and manual
+downloads are preferred.
 
-Automatic updates use a minisign-signed archive; Tauri checks its signature against the public
-key in `tauri.conf.json` before running it. The manually downloaded installer is unsigned, so
-SmartScreen may warn, as it does for a first installation.
+A published `latest.json` feed and signed Windows archive are required for installation. A compiled
+public key alone does not mean that a release feed is available. If the feed is unavailable,
+Codenotch checks GitHub's latest release for a Windows installer and offers its official download.
+A failed check leaves the app running and reports the failure next to its version. Before the
+first successful check, the page does not claim "Up to date".
 
-Before the first signed release, the key has to exist:
+Tauri verifies the archive's minisign signature against the public key shipped in `tauri.conf.json`.
+`requireSignedVersion` also binds the artifact to its announced version and rejects mismatched or
+older releases. Updater signing is separate from Windows Authenticode: the installer is not
+Authenticode-signed, so SmartScreen may still warn on a manual installation.
 
-```powershell
-npx --yes @tauri-apps/cli@2.11.4 signer generate -w $env:USERPROFILE\.tauri\codenotch.key
-```
+Maintainers must keep the existing signing key matching `plugins.updater.pubkey`; do not generate
+a replacement for an ordinary release. Configure the repository secret `TAURI_SIGNING_PRIVATE_KEY`
+and its password `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, then publish the archive and `latest.json`
+to the matching `v<version>` GitHub release. GitHub Actions must also be enabled for CI publishing.
 
-Put the **private** key in the repository secret `TAURI_SIGNING_PRIVATE_KEY` and its password in
-`TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, and paste the **public** key into `plugins.updater.pubkey`
-in `codenotch/tauri.conf.json`, replacing `REPLACE_WITH_TAURI_PUBLIC_KEY`. Until that is done the
-app still checks GitHub releases and offers the manual installer. The packaging job builds an
-ordinary installer without a signed feed, and a `v*` release job fails to flag the missing signing
-configuration to the maintainer.
+The Windows package workflow and `scripts/build-windows.ps1` enable legacy zipped updater artifacts
+(`createUpdaterArtifacts: "v1Compatible"`) when a signing key is present. CLI **2.12.1** signs them
+with the app version and the packaging step validates that version before writing the feed. Builds
+without a signing key still produce the normal installer and portable package, but no update feed.
+For manual signing, pass `--app-version <version>` to `signer sign`; older unbound signatures are
+rejected by this app.
 
-Keep the private key. Losing it means no installed copy can be updated again, because every one of
-them checks against the public key it shipped with — they would all have to reinstall by hand.
+Keep the private key out of the repository. Losing it prevents updates to installed copies that
+trust its public key; those copies would need a manual reinstall to trust a replacement key.
 
 To build from source instead — prerequisites: Rust (MSVC toolchain), WebView2 runtime (ships with Windows 11).
 
@@ -218,6 +227,18 @@ cd codenotch
 npx @tauri-apps/cli@2 build --config tauri.bundle.conf.json
 # → ..\target\release\bundle\nsis\Codenotch_<version>_x64-setup.exe
 ```
+
+### Memory use
+
+The notch stays small without loading a frontend framework. Hidden windows skip repeated UI work;
+reset countdowns update existing elements instead of rebuilding history and quota cards. Settings
+and reset notification windows are destroyed when closed. On supported WebView2 runtimes, hiding
+the notch requests the low-memory target and showing it restores the normal target.
+
+Account polling reuses a bounded, nonsecret registry cache, while file metadata still detects
+external edits and permission changes. Activity readers target a 256 KiB SQLite page cache per
+connection. These changes reduce repeated allocations and background work; total process RAM
+still depends on WebView2, accounts and runtime activity, and has not been measured on Windows.
 
 ### Linux
 

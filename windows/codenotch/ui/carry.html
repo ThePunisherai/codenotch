@@ -34,7 +34,10 @@
   .slot{position:absolute;left:0;top:0;transform-origin:0 0;will-change:transform}
 
   /* notch.html's cells */
-  .cell{display:flex;flex-direction:column;align-items:center;gap:6px}
+  .cell{display:flex;flex-direction:column;align-items:center;gap:7px;min-width:56px}
+  .cell.compact-upright{flex-direction:row;gap:6px;min-width:62px;--ring:36px;--k:calc(36 / 56)}
+  .cell.compact-upright .pct{font-size:11px;width:28px;min-width:28px;max-width:28px;text-align:left;letter-spacing:0}
+  .cell.compact-flat{min-width:44px}
   :root{--ring:44px;--k:calc(44 / 56)}
   .ringwrap{position:relative;width:var(--ring);height:var(--ring)}
   .ringwrap > svg.ring,.ringwrap > svg.reading,.ringwrap > svg.activity{position:absolute;inset:0;overflow:visible}
@@ -48,7 +51,7 @@
   .glyph .mark svg{width:calc(26px * var(--k));height:calc(26px * var(--k));fill:currentColor}
   .glyph img.png{width:calc(26px * var(--k));height:calc(26px * var(--k));object-fit:contain}
   .glyph img.appicon{width:calc(30px * var(--k));height:calc(30px * var(--k));border-radius:calc(8px * var(--k));object-fit:cover}
-  .pct{font-size:15px;font-weight:600;color:var(--ink);font-variant-numeric:tabular-nums}
+  .pct{font-size:13px;line-height:20px;font-weight:600;letter-spacing:.1px;color:var(--ink-2);font-variant-numeric:tabular-nums;max-width:56px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .dim{opacity:.55}
   .ringwrap.stale > svg.ring,.ringwrap.stale > svg.reading,.ringwrap.stale > .glyph{opacity:.55}
   @keyframes spin{to{transform:rotate(360deg)}}
@@ -252,8 +255,11 @@ const parts = document.getElementById('parts'), firstPart = document.getElementB
 const goo = document.getElementById('goo'), blur = goo.querySelector('feGaussianBlur');
 const cellBox = document.getElementById('cells');
 let slots = [];
-function buildCells(){
-  cellBox.innerHTML = (st.shape.cells || []).map(html => `<div class="slot">${html}</div>`).join('');
+let cellLayout = null;
+function buildCells(upright=vertical(st.edge)){
+  cellLayout = upright;
+  const cells = (upright ? st.shape.upright_cells : st.shape.flat_cells) || st.shape.cells || [];
+  cellBox.innerHTML = cells.map(html => `<div class="slot">${html}</div>`).join('');
   slots = [...cellBox.children].map(el => ({ el, w: el.offsetWidth, h: el.offsetHeight }));
 }
 
@@ -302,6 +308,9 @@ function draw(hand){
     body.style.display = 'none'; parts.style.display = '';
   }
   const n = slots.length, k = st.size;
+  // At a new edge use the same compact cell arrangement that the real notch will show on landing.
+  const upright=vertical(placeAt(p)[0]);
+  if(cellLayout!==upright)buildCells(upright);
   const sign = st.edge === 'top' || st.edge === 'right' ? 1 : -1;
   const pitch = from.pitch + (to.pitch - from.pitch) * turned, inset = from.inset + (to.inset - from.inset) * turned;
   slots.forEach((s, i) => {

@@ -19,9 +19,9 @@ const CARD_W: f64 = 280.0;
 const CARD_H: f64 = 150.0;
 const SHOW_FOR: Duration = Duration::from_secs(6);
 /// Logical px the pill occupies at the notch window's near edge on an upright edge (`#pill` in
-/// notch.html is 70 px wide); used as an approximation of its depth when the notch lies flat too,
+/// notch.html is 78 px wide); used as an approximation of its depth when the notch lies flat too,
 /// since a flat pill's own height is not a fixed constant the way its width is.
-const PILL_DEPTH: f64 = 70.0;
+const PILL_DEPTH: f64 = 78.0;
 
 #[derive(Default)]
 struct QueueState {

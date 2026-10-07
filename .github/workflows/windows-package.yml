@@ -102,9 +102,9 @@ jobs:
           # installer and only the smoke test below noticed.
           $cliArgs = @('--config', 'tauri.bundle.conf.json')
           if ($env:SIGNED -eq 'true') {
-            $cliArgs += @('--config', '{"bundle":{"createUpdaterArtifacts":true}}')
+            $cliArgs += @('--config', '{"bundle":{"createUpdaterArtifacts":"v1Compatible"}}')
           }
-          npx --yes @tauri-apps/cli@2.11.4 build @cliArgs -- --locked
+          npx --yes @tauri-apps/cli@2.12.1 build @cliArgs -- --locked
 
       # The bundler names the file after the version, which would change the
       # URL every release. One fixed name lets the README link to
@@ -118,6 +118,8 @@ jobs:
       - name: Package the portable app
         run: |
           New-Item -ItemType Directory -Path portable -Force | Out-Null
+          if (Test-Path portable/.codenotch-installed) { Remove-Item portable/.codenotch-installed -Force }
+          Set-Content portable/codenotch-portable.marker 'Codenotch portable' -Encoding utf8
           Copy-Item target/release/codenotch.exe portable/codenotch.exe
           Copy-Item target/hook/release/codenotch-hook.exe portable/codenotch-hook.exe
           @(
@@ -130,6 +132,10 @@ jobs:
             ''
             'Open Settings from the notch or system tray to configure the reset tracker.'
             'Codenotch needs to remain running to show reset notifications.'
+            ''
+            'Automatic update checks run shortly after launch and every six hours by default.'
+            'Portable copies offer an installer download and never install an update automatically.'
+            'Keep codenotch-portable.marker beside the app to preserve portable update behavior.'
           ) -join "`r`n" | Set-Content portable/README.txt -Encoding utf8
           Compress-Archive -Path portable/* -DestinationPath Codenotch-Portable.zip -Force
 
@@ -202,6 +208,12 @@ jobs:
           $sigPath = "$($zip[0].FullName).sig"
           $signature = if (Test-Path $sigPath) { (Get-Content $sigPath -Raw).Trim() } else { '' }
           $version = (Get-Content codenotch/tauri.conf.json -Raw | ConvertFrom-Json).version
+          if ([string]::IsNullOrWhiteSpace($signature)) { throw 'Updater signature is missing.' }
+          $signatureText = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($signature))
+          $trustedComment = ($signatureText -split "`n" | Where-Object { $_.StartsWith('trusted comment: ') }) -join ''
+          if (($trustedComment.Trim() -split "`t") -notcontains "version:$version") {
+            throw 'Updater signature does not bind the published version.'
+          }
           $feed = [ordered]@{
             version = $version
             pub_date = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
@@ -273,6 +285,9 @@ jobs:
             throw 'No TAURI_SIGNING_PRIVATE_KEY, so this release carries no update feed and no installed copy will see it. The installer above is fine; see windows/README.md to make the key.'
           }
           $feed = Get-Content latest.json -Raw | ConvertFrom-Json
+          if ($env:TAG -ne "v$($feed.version)") {
+            throw 'Release tag must match the signed app version before publishing its update feed.'
+          }
           if (-not $feed.platforms.'windows-x86_64'.signature) {
             throw 'the updater archive was not signed; refusing to publish a feed every updater would reject'
           }

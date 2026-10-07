@@ -50,6 +50,18 @@ const event = { id:'reset-1', announced_at:NOW-86400000, summary:'Fixture: a ver
 const state = { status:'ok', fetched_at:NOW-60000, notifications:true, last_reset:event, history:[event],
   forecast:{ probability_24h:12, probability_48h:36, confidence:'low', confidence_note:'Fixture history is small.' } };
 
+test('live tick preserves history and personal card nodes while advancing the checked age and countdown', () => {
+  const page = view();
+  page.render({...state,checked_at:NOW-5000,next_check_at:NOW+60000}, {status:'ok',fetched_at:NOW,windows:[{label:'5h limit',used:.4,resets_at:NOW+1000}]});
+  const history = page.node('reset-history').children[0], card = page.node('reset-personal-windows').children[0];
+  vm.runInContext('renderResetClock(Date.now()+2000)',page.context);
+  assert.equal(page.node('reset-history').children[0],history);
+  assert.equal(page.node('reset-personal-windows').children[0],card);
+  assert.equal(card.children[1].textContent,'Awaiting usage update');
+  assert.equal(page.node('reset-updated').textContent,'Checked 7s ago');
+  assert.equal(page.node('reset-next-check').textContent,'Next check 0:58');
+});
+
 test('public announcement, historical forecast and account countdown stay distinct', () => {
   const page = view();
   page.render(state, { status:'ok', fetched_at:NOW, windows:[{label:'5h limit', used:.4, resets_at:NOW+4500000}] });

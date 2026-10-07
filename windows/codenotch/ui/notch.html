@@ -39,12 +39,12 @@
   /* The pill on the right edge */
   #pill{
     position:absolute;right:0;top:50%;transform:translateY(-50%);
-    width:70px;padding:18px 0;background:var(--pill);
+    width:78px;padding:20px 0;background:var(--pill);
     border-radius:20px 0 0 20px;
     /* Stays visible on dark wallpapers: a thin stroke plus a faint glow, the only outline when black sits on black */
     border:1px solid var(--edge);border-right:none;
     box-shadow:none;
-    display:flex;flex-direction:column;align-items:center;gap:14px;cursor:pointer;
+    display:flex;flex-direction:column;align-items:center;gap:18px;cursor:pointer;
   }
   /* Fillets: the concave arcs between the pill's top/bottom and the screen edge (the inverse rounded
      corner in the upstream design frame). An R×R black square hugs the edge and a radial gradient
@@ -64,11 +64,17 @@
     bottom:calc(-1 * var(--fillet));
     background:radial-gradient(circle at 0 100%, transparent calc(var(--fillet) - 1.5px), var(--edge) calc(var(--fillet) - 0.5px), var(--pill) calc(var(--fillet) + 0.5px));
   }
-  .cell{display:flex;flex-direction:column;align-items:center;gap:6px}
-  /* The ring takes the Mac's own share of the body, NotchLayout.ringDiameter against sideBodyDepth: 44 in
-     70. At 56 it left an outside weekly ring 2.8 px from the screen edge, where the Mac keeps it about 10
-     clear ("far enough in that the bezel is never touched"). The arcs are drawn in a 56-unit viewBox and
-     scale with the ring on their own; the glyphs are sized here in px, so they take the same factor. */
+  .cell{display:flex;flex-direction:column;align-items:center;gap:7px;min-width:56px}
+  /* Extra providers stay inside the existing window instead of creating a larger WebView surface. */
+  body[data-edge="top"] #pill.dense-flat,body[data-edge="bottom"] #pill.dense-flat{gap:14px;padding:14px 18px}
+  #pill.dense-flat .cell{min-width:44px}
+  body[data-edge="left"] #pill.dense-upright,body:not([data-edge]) #pill.dense-upright,
+  body[data-edge="right"] #pill.dense-upright{gap:12px;padding:20px 0}
+  .cell.compact-upright{flex-direction:row;gap:6px;min-width:62px;--ring:36px;--k:calc(36 / 56)}
+  .cell.compact-upright .pct{font-size:11px;width:28px;min-width:28px;max-width:28px;text-align:left;letter-spacing:0}
+  .cell.compact-flat{min-width:44px}
+  /* Rings keep their 44 px size inside a roomier 78 px body. Compact side layouts use 36 px rings;
+     the 56-unit SVG and provider glyphs scale together through these two variables. */
   :root{--ring:44px;--k:calc(44 / 56)}
   .ringwrap{position:relative;width:var(--ring);height:var(--ring);transition:transform .3s cubic-bezier(.34,1.4,.64,1)}
   .ringwrap.pressed{transform:scale(.93)}
@@ -86,7 +92,7 @@
   .glyph img.appicon{width:calc(30px * var(--k));height:calc(30px * var(--k));border-radius:calc(8px * var(--k));object-fit:cover}
   .c-head .mark{display:inline-block;width:16px;height:16px;color:var(--ink-2);margin-right:2px}
   .c-head .mark svg{width:16px;height:16px;fill:currentColor}
-  .pct{font-size:15px;font-weight:600;color:var(--ink);font-variant-numeric:tabular-nums}
+  .pct{font-size:13px;line-height:20px;font-weight:600;letter-spacing:.1px;color:var(--ink-2);font-variant-numeric:tabular-nums;max-width:56px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .dim{opacity:.55}
   /* A stale reading dims the reading only. The track, the week and the glyph are all saying the same
      old thing, but whether an agent is running right now is current either way, so the activity arc
@@ -105,11 +111,11 @@
 
   /* Hover card, shown to the left of the pill */
   #card{
-    position:absolute;left:5px;right:108.7px;top:50%;transform:translateY(-50%);
+    position:absolute;left:5px;right:116.7px;top:50%;transform:translateY(-50%);
     /* Anchored on both sides = fluid width: whatever the WebView's real logical width, the card cannot
        extend past the window's left edge (a fixed max-width got clipped when the DPI disagreed).
        The 246 cap matches the upstream spec. */
-    max-width:246px;margin-left:auto;background:var(--card);border-radius:16px;padding:16px;
+    max-width:246px;margin-left:auto;background:var(--card);border:1px solid var(--card-line);border-radius:16px;padding:16px;
     overflow-wrap:anywhere;min-width:0;
     max-height:calc(100% - 16px);overflow-x:hidden;overflow-y:auto;scrollbar-width:thin; /* actions stay reachable in a tall card */
     display:none;
@@ -119,9 +125,9 @@
      leave the card tangent to its edge so the two read as one shape. An element of its own rather
      than ::after, so the card's overflow cannot clip it and it can be reported as hot. The Mac's
      size, 28.2 long and 32.7 across (NotchLayout.tailLength, tailHeight), its tip stopping 10.5
-     short of the pill (tailGap): hence the card's 108.7 = the pill's 70 + 10.5 + 28.2. */
+     short of the pill (tailGap): the card's 116.7 = the pill's 78 + 10.5 + 28.2. */
   #tail{
-    position:absolute;right:80.5px;width:28.2px;height:32.7px;background:var(--card);display:none;
+    position:absolute;right:88.5px;width:28.2px;height:32.7px;background:var(--card);display:none;
     clip-path:path('M0 0C0 8.18 16.36 12.43 28.2 16.36C16.36 20.29 0 24.54 0 32.72Z');
   }
   #card.show + #tail{display:block}
@@ -161,14 +167,14 @@
   body[data-edge="left"] #pill::before,body[data-edge="left"] #pill::after{right:auto;left:0}
   body[data-edge="left"] #pill::before{background:radial-gradient(circle at 100% 0, transparent calc(var(--fillet) - 1.5px), var(--edge) calc(var(--fillet) - 0.5px), var(--pill) calc(var(--fillet) + 0.5px))}
   body[data-edge="left"] #pill::after{background:radial-gradient(circle at 100% 100%, transparent calc(var(--fillet) - 1.5px), var(--edge) calc(var(--fillet) - 0.5px), var(--pill) calc(var(--fillet) + 0.5px))}
-  body[data-edge="left"] #card{left:108.7px;right:5px;margin-left:0;margin-right:auto}
-  body[data-edge="left"] #tail{right:auto;left:80.5px;clip-path:path('M28.2 0C28.2 8.18 11.84 12.43 0 16.36C11.84 20.29 28.2 24.54 28.2 32.72Z')}
+  body[data-edge="left"] #card{left:116.7px;right:5px;margin-left:0;margin-right:auto}
+  body[data-edge="left"] #tail{right:auto;left:88.5px;clip-path:path('M28.2 0C28.2 8.18 11.84 12.43 0 16.36C11.84 20.29 28.2 24.54 28.2 32.72Z')}
 
   /* Top and bottom: the pill lies flat, so it is a row and its thickness comes from the cells rather
-     than a fixed 70 px column. The card is centred under (or over) the hovered ring by `placeCard`. */
+     than a fixed 78 px column. The card is centred under (or over) the hovered ring by `placeCard`. */
   body[data-edge="top"] #pill,body[data-edge="bottom"] #pill{
     right:auto;left:50%;top:auto;transform:translateX(-50%);
-    flex-direction:row;width:auto;height:auto;padding:12px 18px;
+    flex-direction:row;width:auto;height:auto;padding:14px 24px;
     /* Both ends have a flare here, and each flare's edge line runs on into the pill's own: without this
        one, the far flare's line stopped short at the pill and stood out of it as a stub */
     border-right:1px solid var(--edge);
@@ -432,6 +438,7 @@ function applyEdge(e){
   if(next===notchEdge) return;
   notchEdge=next;
   document.body.dataset.edge=next;
+  renderRing();
   // The window changes shape with the edge, and so does the width the zoom correction measures against
   reportDpr();
   // The pill changes shape, so both the hot rectangles and the card's anchor have to be measured again
@@ -1224,8 +1231,15 @@ function dashedArc(r,frac,color,width,extra=''){
     transform="rotate(-90 28 28)" ${extra}/>`;
 }
 
+function drawSvg(element, markup){
+  if(element.__markup === markup) return;
+  element.__markup = markup;
+  element.innerHTML = markup;
+}
 function renderRing(){
   const ps=providers();
+  pill.classList.toggle('dense-flat',!edgeIsVertical() && ps.length>6);
+  pill.classList.toggle('dense-upright',edgeIsVertical() && ps.length>5);
   // Rebuild the DOM only when the structure changes (never swap the element under the cursor)
   const want=ps.map(p=>p.id+':'+(glyphs[p.base]?glyphs[p.base].kind:'-')).join(',');
   if(pill.dataset.cells!==want){
@@ -1236,11 +1250,13 @@ function renderRing(){
   }
   for(const p of ps){
     const cell=pill.querySelector(`.cell[data-p="${p.id}"]`); if(!cell) continue;
+    cell.classList.toggle('compact-upright',edgeIsVertical() && ps.length>5);
+    cell.classList.toggle('compact-flat',!edgeIsVertical() && ps.length>6);
     const svg=cell.querySelector('svg.ring'), reading=cell.querySelector('svg.reading'), activity=cell.querySelector('svg.activity'), pct=cell.querySelector('.pct'), glyph=cell.querySelector('.glyph'), wrap=cell.querySelector('.ringwrap');
     const h=headlineOf(p.snap,p.base);
     let inner=`<circle cx="28" cy="28" r="22" fill="${HOLE}"/><circle cx="28" cy="28" r="25" fill="none" stroke="${TRACK}" stroke-width="5"/>`;
     wrap.classList.toggle('pressed',!!refreshing[p.id]);
-    reading.innerHTML=h && h.count==null?svgArc(25,Math.min(h.used,1),tone(h.used),5):'';
+    drawSvg(reading,h && h.count==null?svgArc(25,Math.min(h.used,1),tone(h.used),5):'');
     if(weeklyRing!=='off'){ // the week, thinner and at its own radius, in its own colour: a session at 12% beside a week at 91% is the case this exists for
       const wk=weeklyOf(p.snap,p.base);
       // Inside, it shares the gap with the working indicator, so it stands down while that is showing
@@ -1256,18 +1272,19 @@ function renderRing(){
         inner+=track+arc;
       }
     }
-    svg.innerHTML=inner;
+    drawSvg(svg,inner);
     { // thin inner arc: spinning white = working, yellow pulse = waiting on you (one animation for all four, different sources)
       // Its own layer, so a stale reading can dim around it without dimming it: see `.ringwrap.stale`
       const ws=workState(p.base);
-      if(ws==='running') activity.innerHTML=`<g class="arc-spin">${svgArc(19,0.28,INK,2.5)}</g>`;
-      else if(ws==='attention') activity.innerHTML=`<g class="arc-pulse"><circle cx="28" cy="28" r="19" fill="none" stroke="${WATCH}" stroke-width="2.5"/></g>`;
-      else activity.innerHTML='';
+      if(ws==='running') drawSvg(activity,`<g class="arc-spin">${svgArc(19,0.28,INK,2.5)}</g>`);
+      else if(ws==='attention') drawSvg(activity,`<g class="arc-pulse"><circle cx="28" cy="28" r="19" fill="none" stroke="${WATCH}" stroke-width="2.5"/></g>`);
+      else drawSvg(activity,'');
     }
     if(p.snap.status==='needsAuth'||p.snap.status==='none') pct.textContent='—';
     else if(h && h.count!=null) pct.textContent='~'+h.count;
     else if(h) pct.textContent=(h.derived?'~':'')+pctText(h.used)+'%';
     else pct.textContent=p.snap.windows.length?'—':'…'; // its declared window is missing: a dash, not a wait
+    pct.title=pct.textContent;
     glyph.classList.toggle('dim', !!(h && h.used>=1));
     wrap.classList.toggle('stale', staleOf(p.snap));
   }
@@ -1549,7 +1566,7 @@ function armWatchdog(){
 // `notch_window_size` in main.rs: NOTCH_W upright, NOTCH_LONG lying flat. Dividing by 360 on a
 // flat edge read the wider window as a DPR error and zoomed the whole notch by 520/360. Either number
 // left behind when the window changes width does the same thing, so a test in main.rs pins both.
-const DESIGN_W_UPRIGHT=360, DESIGN_W_FLAT=650;
+const DESIGN_W_UPRIGHT=376, DESIGN_W_FLAT=650;
 function designWidth(){ return edgeIsVertical()?DESIGN_W_UPRIGHT:DESIGN_W_FLAT; }
 function fitZoom(){
   const z=innerWidth/designWidth();
@@ -1675,13 +1692,27 @@ document.addEventListener('mousemove',e=>{
    from the cells, not from the pill, which is only ever one of the two. Borders included. */
 function carryShape(){
   const cells=[...pill.querySelectorAll('.cell')], n=Math.max(1,cells.length);
-  const cw=cells[0]?cells[0].offsetWidth:44, ch=cells[0]?cells[0].offsetHeight:70, gap=14, ends=36;
-  return {
-    radius:20, fillet:parseFloat(getComputedStyle(pill).getPropertyValue('--fillet'))||38.7,
-    upright:{depth:70, length:ends+n*ch+(n-1)*gap+2, pitch:ch+gap, inset:34.5},
-    flat:{depth:24+ch+1, length:ends+n*cw+(n-1)*gap+2, pitch:cw+gap, inset:12+ch/2},
-    cells:cells.map(el=>el.outerHTML)
+  const originalEdge=document.body.dataset.edge, originalVertical=edgeIsVertical();
+  const measure=upright=>{
+    document.body.dataset.edge=upright?'right':'top';
+    pill.classList.toggle('dense-flat',!upright && n>6);
+    pill.classList.toggle('dense-upright',upright && n>5);
+    for(const cell of cells){
+      cell.classList.toggle('compact-upright',upright && n>5);
+      cell.classList.toggle('compact-flat',!upright && n>6);
+    }
+    const style=getComputedStyle(pill), gap=parseFloat(style.gap)||18;
+    const cw=cells[0]?cells[0].offsetWidth:56, ch=cells[0]?cells[0].offsetHeight:71;
+    const padX=parseFloat(style.paddingLeft)+parseFloat(style.paddingRight), padY=parseFloat(style.paddingTop)+parseFloat(style.paddingBottom);
+    return {shape:upright?{depth:78,length:padY+n*ch+(n-1)*gap+2,pitch:ch+gap,inset:38.5}
+      :{depth:padY+ch+1,length:padX+n*cw+(n-1)*gap+2,pitch:cw+gap,inset:padY/2+ch/2},cells:cells.map(el=>el.outerHTML)};
   };
+  const upright=measure(true), flat=measure(false);
+  measure(originalVertical);
+  if(originalEdge===undefined)delete document.body.dataset.edge;else document.body.dataset.edge=originalEdge;
+  return {radius:20,fillet:parseFloat(getComputedStyle(pill).getPropertyValue('--fillet'))||38.7,
+    upright:upright.shape,flat:flat.shape,upright_cells:upright.cells,flat_cells:flat.cells,
+    cells:cells.map(el=>el.outerHTML)};
 }
 // Emptied once the overlay has this notch drawn, and shown again where it was put down, after which
 // the overlay can go — so between them there is never a frame with neither
@@ -2195,7 +2226,7 @@ listen('accounts-updated',e=>{notchAccountRevision++;if(e.payload&&Array.isArray
 refreshNotchAccountMetadata();
 readNotchProviderSnapshot('get_usage',u=>{usage=u||usage;}).catch(e=>notice('get_usage failed: '+e));
 invoke('get_state').then(s=>{stateSnap=s||stateSnap;setUiLanguage(stateSnap.lang_resolved);renderRing();}).catch(()=>{});
-setInterval(renderRing,30_000); // stale state and reset copy move with time
+setInterval(()=>{if(!document.hidden)renderRing();},30_000); // no redraws for a hidden window
 setInterval(async()=>{
   if(!claudeAuth.busy&&!(hoverId==='claude'&&card.classList.contains('show'))) return;
   try{

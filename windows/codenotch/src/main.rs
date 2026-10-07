@@ -40,11 +40,11 @@ mod updater;
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager};
 
-/// Logical size of the notch window: the 70 pt pill column on the right plus room for the hover card
+/// Logical size of the notch window: the 78 pt pill column on the right plus room for the hover card
 /// and its tail on the left. `fitZoom` in ui/notch.html divides by the same width.
-pub const NOTCH_W: f64 = 360.0;
+pub const NOTCH_W: f64 = 376.0;
 /// Hand-bumped build tag, written to run.log at startup so a log can always be matched to the exe that wrote it.
-pub const BUILD: &str = "r35-multiaccount-live";
+pub const BUILD: &str = "r36-lean-auto-update";
 /// The notch window's long side: the upright window's height, and both sides of the flat one.
 ///
 /// Five cells make a 447 px pill; its fillets add 38.7 px at each end and the settings orb reaches
@@ -1449,16 +1449,43 @@ pub fn apply_visibility(app: &AppHandle) {
     let _ = app.emit("ui_flags", flags);
     if let Some(w) = app.get_webview_window("notch") {
         if notch {
+            set_webview_memory_target(&w, false);
             let _ = w.show();
             place_notch(app);
         } else {
             let _ = w.hide();
+            set_webview_memory_target(&w, true);
         }
     }
     if let Some(t) = app.tray_by_id("main") {
         let _ = t.set_visible(tray_on);
     }
 }
+
+/// Hidden notch pages keep receiving native quota events while WebView2 releases disposable
+/// caches. Restore normal mode before showing; hover folding remains an active visible window.
+#[cfg(windows)]
+fn set_webview_memory_target(window: &tauri::WebviewWindow, inactive: bool) {
+    use windows_core::Interface;
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2_19, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW,
+        COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL,
+    };
+    let _ = window.with_webview(move |platform| unsafe {
+        if let Ok(core) = platform.controller().CoreWebView2() {
+            if let Ok(memory) = core.cast::<ICoreWebView2_19>() {
+                let _ = memory.SetMemoryUsageTargetLevel(if inactive {
+                    COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW
+                } else {
+                    COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL
+                });
+            }
+        }
+    });
+}
+
+#[cfg(not(windows))]
+fn set_webview_memory_target(_: &tauri::WebviewWindow, _: bool) {}
 
 // ---------------- settings that used to live in the tray menu ----------------
 
@@ -1877,6 +1904,7 @@ fn main() {
             updater::check_for_update,
             updater::install_update,
             updater::open_update_installer,
+            updater::set_auto_update,
             get_codex,
             get_reset_notifications,
             set_reset_notifications,
@@ -1964,7 +1992,7 @@ fn main() {
             // Before the notch is shown: a window shown on the system appearance and corrected
             // after paints the wrong one for a frame, which is a black flash under a light choice
             apply_theme(&handle);
-            if let Some(w) = handle.get_webview_window("notch") {
+            if let Some(w) = handle.get_webview_window("notch").filter(|_| handle.state::<AppState>().cfg.lock().unwrap().notch_visible) {
                 let _ = w.show();
             }
             tray::setup(&handle)?;
@@ -2099,12 +2127,13 @@ mod tests {
     }
 
     #[test]
-    fn a_flat_notch_is_wide_enough_for_six_rings() {
-        // 6 × 44 px rings + 5 × 14 px gaps + 36 px padding + 2 × 38.7 px fillets + the orb's 28.5 px reach
-        let pill = 6.0 * 44.0 + 5.0 * 14.0 + 36.0 + 2.0 * (38.7 + 28.5);
+    fn a_flat_notch_fits_wide_six_and_dense_eight_providers() {
+        let endcaps = 2.0 * (38.7 + 28.5);
+        let wide_six = 6.0 * 56.0 + 5.0 * 18.0 + 48.0 + endcaps;
+        let dense_eight = 8.0 * 44.0 + 7.0 * 14.0 + 36.0 + endcaps;
         for edge in ["top", "bottom"] {
             let (w, h) = notch_window_size(edge);
-            assert!(w >= pill, "{edge}: {w} px cannot hold a {pill} px pill");
+            assert!(w >= wide_six && w >= dense_eight, "{edge}: {w} px clips the pill or its orb");
             // `#card`'s max-height on a flat edge is the window less 150 px for the pill, the 30 px
             // gap and the margins, and the tallest card the page has measured is 400 px.
             assert!(h - 150.0 >= 400.0, "{edge}: {h} px leaves the card too little room");
@@ -2209,7 +2238,7 @@ mod tests {
     #[test]
     fn an_upright_notch_has_room_for_five_rings_and_the_orb() {
         // 5 cells (44 px ring + 6 px gap + 21 px percentage) + 4 × 14 px gaps + 36 px padding
-        let pill = 5.0 * (44.0 + 6.0 + 21.0) + 4.0 * 14.0 + 36.0;
+        let pill = 5.0 * (44.0 + 6.0 + 21.0) + 4.0 * 18.0 + 52.0;
         for edge in ["left", "right"] {
             let (_, h) = notch_window_size(edge);
             assert!(h / 2.0 >= pill / 2.0 + 38.7 + 28.5, "{edge}: {h} px leaves no room for the orb");
