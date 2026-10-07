@@ -6,7 +6,7 @@ name: Windows Package
 # Windows file at all.
 on:
   push:
-    branches: [main]
+    branches: [main, codex-reset-tracker]
     paths:
       - 'windows/**'
       - '.github/workflows/windows-package.yml'
@@ -20,16 +20,21 @@ on:
     types: [published]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-package-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
 jobs:
   package:
-    # workflow_dispatch is let through so a fork can try the installer before
-    # opening a pull request; every other trigger only runs here.
-    if: github.repository == 'vinzdg/codenotch' || github.event_name == 'workflow_dispatch'
+    if: github.repository == 'vinzdg/codenotch' || github.repository == 'ThePunisherai/codenotch' || github.event_name == 'workflow_dispatch'
     name: NSIS installer
-    # Only the release step writes anything; `gh release upload` fails without it.
-    permissions:
-      contents: write
     runs-on: windows-latest
+    timeout-minutes: 50
+    outputs:
+      signed: ${{ steps.signing.outputs.signed }}
     defaults:
       run:
         shell: pwsh
@@ -37,8 +42,19 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # Pinned by commit: this job holds contents: write, and `stable` is a
-      # moving branch that would let the action change under us.
+      - name: Check UI scripts and regression tests
+        run: |
+          node scripts/check-ui-scripts.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/test-update-ui.cjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/test-claude-auth-ui.cjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test test-light-surface.cjs test-carry.cjs test-codex-headline.cjs test-reset-card.cjs scripts/test-ko-i18n.cjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # Keep the existing toolchain action pin so a branch preview uses the
+      # same installer toolchain as releases.
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
 
       - uses: Swatinem/rust-cache@v2
@@ -99,6 +115,24 @@ jobs:
           if ($setup.Count -ne 1) { throw "expected one installer, found $($setup.Count)" }
           Copy-Item $setup[0].FullName Codenotch-Setup.exe
 
+      - name: Package the portable app
+        run: |
+          New-Item -ItemType Directory -Path portable -Force | Out-Null
+          Copy-Item target/release/codenotch.exe portable/codenotch.exe
+          Copy-Item target/hook/release/codenotch-hook.exe portable/codenotch-hook.exe
+          @(
+            'Codenotch for Windows'
+            ''
+            'Extract this entire folder, then double-click codenotch.exe.'
+            'Keep codenotch-hook.exe beside it if you use the Claude Code hooks.'
+            'The Microsoft Edge WebView2 Runtime must be installed.'
+            'If WebView2 is missing, use Codenotch-Setup.exe instead.'
+            ''
+            'Open Settings from the notch or system tray to configure the reset tracker.'
+            'Codenotch needs to remain running to show reset notifications.'
+          ) -join "`r`n" | Set-Content portable/README.txt -Encoding utf8
+          Compress-Archive -Path portable/* -DestinationPath Codenotch-Portable.zip -Force
+
       # What someone double-clicking the download gets, on a machine that has
       # never seen Codenotch: the hook beside the app (hooks_install.rs looks
       # for it there, so Install hooks fails without it), and an app that starts.
@@ -129,6 +163,12 @@ jobs:
           path: windows/Codenotch-Setup.exe
           if-no-files-found: error
 
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Codenotch-Portable-${{ github.sha }}
+          path: windows/Codenotch-Portable.zip
+          if-no-files-found: error
+
       # SmartScreen's warning names neither the fix nor the reason, so the
       # run's own page says both, next to the file they apply to.
       - name: Explain how to open it
@@ -138,6 +178,8 @@ jobs:
             ''
             'Download the artifact below, unzip it, and run `Codenotch-Setup.exe`.'
             'It installs for the current user, without administrator rights.'
+            'For a portable copy, extract `Codenotch-Portable.zip` and run `codenotch.exe`.'
+            'The portable copy requires the Microsoft Edge WebView2 Runtime.'
             ''
             'The installer is not code-signed, so SmartScreen says *Windows protected your PC*'
             'the first time. Choose **More info**, then **Run anyway**.'
@@ -151,6 +193,8 @@ jobs:
       # at release time would be found by users rather than by CI.
       - name: Build the update feed
         if: steps.signing.outputs.signed == 'true'
+        env:
+          RELEASE_REPOSITORY: ${{ github.repository }}
         run: |
           $zip = @(Get-ChildItem target/release/bundle/nsis/*-setup.nsis.zip -ErrorAction SilentlyContinue)
           if ($zip.Count -ne 1) { throw "expected one updater archive, found $($zip.Count)" }
@@ -164,7 +208,7 @@ jobs:
             platforms = [ordered]@{
               'windows-x86_64' = [ordered]@{
                 signature = $signature
-                url = "https://github.com/vinzdg/codenotch/releases/download/v$version/Codenotch-Setup.nsis.zip"
+                url = "https://github.com/$env:RELEASE_REPOSITORY/releases/download/v$version/Codenotch-Setup.nsis.zip"
               }
             }
           }
@@ -180,25 +224,50 @@ jobs:
             windows/Codenotch-Setup.nsis.zip
           if-no-files-found: error
 
+  # Packaging PRs and branch previews only needs read access. Release publishing
+  # gets a separate, explicitly gated write token after packaging succeeds.
+  publish:
+    if: github.event_name == 'release' && startsWith(github.event.release.tag_name, 'v')
+    needs: package
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: Codenotch-Setup-${{ github.sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: Codenotch-Portable-${{ github.sha }}
+
+      - uses: actions/download-artifact@v8
+        if: needs.package.outputs.signed == 'true'
+        with:
+          name: Codenotch-update-feed-${{ github.sha }}
+
       # v* only: the rolling `preview` release belongs to Package, which deletes
       # every asset on it each time it refreshes.
       - name: Attach to the release
-        if: github.event_name == 'release' && startsWith(github.event.release.tag_name, 'v')
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name }}
-        run: gh release upload $env:TAG Codenotch-Setup.exe --clobber
+          GH_REPO: ${{ github.repository }}
+        run: gh release upload $env:TAG Codenotch-Setup.exe Codenotch-Portable.zip --clobber
 
       # Last, and only once the installer is up: latest.json is what sends every
       # installed copy to that file, so it must never name one that is not there yet.
       # An unsigned build is refused rather than published — the updater would reject
       # the download anyway, and a feed nobody can use is worse than no feed.
       - name: Publish the update feed
-        if: github.event_name == 'release' && startsWith(github.event.release.tag_name, 'v')
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name }}
-          SIGNED: ${{ steps.signing.outputs.signed }}
+          SIGNED: ${{ needs.package.outputs.signed }}
+          GH_REPO: ${{ github.repository }}
         run: |
           if ($env:SIGNED -ne 'true') {
             throw 'No TAURI_SIGNING_PRIVATE_KEY, so this release carries no update feed and no installed copy will see it. The installer above is fine; see windows/README.md to make the key.'

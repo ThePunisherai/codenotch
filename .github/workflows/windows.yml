@@ -5,7 +5,7 @@ name: Windows
 # file, so those two stay about the Mac app.
 on:
   push:
-    branches: [main]
+    branches: [main, codex-reset-tracker]
     paths:
       - 'windows/**'
       - '.github/workflows/windows.yml'
@@ -13,10 +13,18 @@ on:
     paths:
       - 'windows/**'
       - '.github/workflows/windows.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-checks-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
-    if: github.repository == 'vinzdg/codenotch'
+    if: github.repository == 'vinzdg/codenotch' || github.repository == 'ThePunisherai/codenotch' || github.event_name == 'workflow_dispatch'
     name: Build and test
     runs-on: windows-latest
     defaults:
@@ -64,6 +72,9 @@ jobs:
       - name: Test Codex headline selection
         run: node --test test-codex-headline.cjs
 
+      - name: Test reset notification card
+        run: node --test test-reset-card.cjs
+
       # Reported rather than enforced: the crate already carries warnings, and
       # failing on them would hold every change hostage to that cleanup.
       - name: Clippy
@@ -72,7 +83,7 @@ jobs:
   # The same crate builds on Linux, where the Win32 paths compile out. Kept to a
   # build and the tests: there is no runner with a desktop to show a notch on.
   linux:
-    if: github.repository == 'vinzdg/codenotch'
+    if: github.repository == 'vinzdg/codenotch' || github.repository == 'ThePunisherai/codenotch' || github.event_name == 'workflow_dispatch'
     name: Build and test (Linux)
     runs-on: ubuntu-latest
     defaults:
