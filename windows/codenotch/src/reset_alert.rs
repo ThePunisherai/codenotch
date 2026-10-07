@@ -29,10 +29,16 @@ struct QueueState {
     running: bool,
     dismissed: bool,
     active_token: u64,
+    active_global: bool,
+}
+
+enum AlertEvent {
+    Personal(ResetEvent),
+    Global(crate::global_reset::ConfirmedReset),
 }
 
 struct QueuedAlert {
-    event: ResetEvent,
+    event: AlertEvent,
     preview: bool,
 }
 
@@ -44,6 +50,8 @@ pub struct AlertQueue {
 
 #[derive(Serialize)]
 struct CardPayload {
+    kind: &'static str,
+    scope: &'static str,
     lang: String,
     edge: String,
     attached: bool,
@@ -54,17 +62,31 @@ struct CardPayload {
     status: String,
     next: String,
     dismiss_label: String,
+    source_url: String,
+    source_label: String,
 }
 
 pub fn enqueue(app: &AppHandle, event: ResetEvent) {
     let state = app.state::<AppState>();
     let config = state.cfg.lock().unwrap();
     if config.reset_notifications {
-        enqueue_unchecked(app, event, false);
+        enqueue_unchecked(app, AlertEvent::Personal(event), false);
     }
 }
 
-fn enqueue_unchecked(app: &AppHandle, event: ResetEvent, preview: bool) {
+pub fn enqueue_global(app: &AppHandle, event: crate::global_reset::ConfirmedReset) {
+    let enabled = app
+        .state::<AppState>()
+        .cfg
+        .lock()
+        .unwrap()
+        .global_reset_notifications;
+    if enabled {
+        enqueue_unchecked(app, AlertEvent::Global(event), false);
+    }
+}
+
+fn enqueue_unchecked(app: &AppHandle, event: AlertEvent, preview: bool) {
     let queue = &app.state::<AppState>().reset_alerts;
     let mut state = queue.state.lock().unwrap();
     state.pending.push_back(QueuedAlert { event, preview });
@@ -88,9 +110,10 @@ fn run(app: AppHandle) {
             };
             state.active_token = state.active_token.wrapping_add(1).max(1);
             state.dismissed = false;
+            state.active_global = matches!(&queued.event, AlertEvent::Global(_));
             (queued, state.active_token)
         };
-        if let Err(err) = show(&app, queued.event, token) {
+        if let Err(err) = show(&app, queued.event, token, queued.preview) {
             crate::applog(&format!("reset card: {err}"));
             if queued.preview {
                 let _ = app.emit_to("settings", "reset_alert_preview_error", err);
@@ -107,11 +130,11 @@ fn run(app: AppHandle) {
     }
 }
 
-fn show(app: &AppHandle, event: ResetEvent, token: u64) -> Result<(), String> {
+fn show(app: &AppHandle, event: AlertEvent, token: u64, preview: bool) -> Result<(), String> {
     let app_for_main = app.clone();
     let (sender, receiver) = mpsc::sync_channel(1);
     app.run_on_main_thread(move || {
-        let result = show_on_main(&app_for_main, event, token);
+        let result = show_on_main(&app_for_main, event, token, preview);
         let _ = sender.send(result);
     })
     .map_err(|e| e.to_string())?;
@@ -134,7 +157,12 @@ fn notch_geometry(app: &AppHandle) -> Option<(i32, i32, i32, i32)> {
     Some((pos.x, pos.y, size.width as i32, size.height as i32))
 }
 
-fn show_on_main(app: &AppHandle, event: ResetEvent, token: u64) -> Result<(), String> {
+fn show_on_main(
+    app: &AppHandle,
+    event: AlertEvent,
+    token: u64,
+    preview: bool,
+) -> Result<(), String> {
     let screen = crate::target_screen(app).ok_or("no display available")?;
     let (edge, cfg_scale, visible, lang) = {
         let st = app.state::<AppState>();
@@ -150,36 +178,93 @@ fn show_on_main(app: &AppHandle, event: ResetEvent, token: u64) -> Result<(), St
     let geometry = notch_geometry(app);
     let density = geometry
         .map(|(_, _, w, h)| {
-            let logical = if vertical { crate::NOTCH_W } else { crate::NOTCH_LONG };
+            let logical = if vertical {
+                crate::NOTCH_W
+            } else {
+                crate::NOTCH_LONG
+            };
             (if vertical { w } else { h }) as f64 / logical
         })
         .unwrap_or(screen.scale * cfg_scale);
 
+    let provider = match &event {
+        AlertEvent::Personal(event) => event.provider.as_str(),
+        AlertEvent::Global(_) => "codex",
+    };
     let glyph = app
         .state::<AppState>()
         .glyphs
         .lock()
         .unwrap()
-        .get(&event.provider)
+        .get(provider)
         .cloned()
         .unwrap_or_default();
     let now = crate::now_ms();
-    let provider_name = crate::provider_label(&event.provider);
-    let window_label = traymenu::label(&event.window_label, &lang);
+    let (kind, scope, title, subtitle, status, next, source_url, source_label) = match event {
+        AlertEvent::Personal(event) => {
+            let provider_name = crate::provider_label(&event.provider);
+            let window_label = traymenu::label(&event.window_label, &lang);
+            (
+                "quota_reset",
+                "personal",
+                format!("{provider_name} {}", word_renewed(&lang)),
+                format!("{window_label} {}", word_renewed(&lang)),
+                format!(
+                    "{} · {}%",
+                    word_quota_available(&lang),
+                    traymenu::pct(event.used_fraction)
+                ),
+                event
+                    .next_reset_at
+                    .map(|at| traymenu::reset_text(at, now, &lang))
+                    .unwrap_or_default(),
+                String::new(),
+                String::new(),
+            )
+        }
+        AlertEvent::Global(event) => (
+            "global_reset",
+            "global",
+            if preview {
+                "Reset notification preview"
+            } else {
+                "Codex / ChatGPT Work reset"
+            }
+            .into(),
+            if preview {
+                "Codex / ChatGPT Work · test"
+            } else {
+                "Global reset announced"
+            }
+            .into(),
+            if preview {
+                "No reset event reported"
+            } else {
+                "Check your account usage"
+            }
+            .into(),
+            format!("Source: {}", crate::global_reset::SOURCE_NAME),
+            event
+                .url
+                .unwrap_or_else(|| crate::global_reset::SOURCE_URL.into()),
+            "View reset source".into(),
+        ),
+    };
     let payload = CardPayload {
+        kind,
+        scope,
         lang: lang.clone(),
         edge: edge.clone(),
         attached: visible,
         glyph,
         token,
-        title: format!("{provider_name} {}", word_renewed(&lang)),
-        subtitle: format!("{window_label} {}", word_renewed(&lang)),
-        status: format!("{} · {}%", word_quota_available(&lang), traymenu::pct(event.used_fraction)),
-        next: event
-            .next_reset_at
-            .map(|at| traymenu::reset_text(at, now, &lang))
-            .unwrap_or_default(),
+        title,
+        subtitle,
+        status,
+        next,
         dismiss_label: word_dismiss(&lang).to_string(),
+        source_url,
+        source_label,
     };
     let json = serde_json::to_string(&payload).map_err(|e| e.to_string())?;
     let script = format!(
@@ -222,8 +307,14 @@ fn show_on_main(app: &AppHandle, event: ResetEvent, token: u64) -> Result<(), St
             match edge.as_str() {
                 "left" => (nx + pill, ny + nh / 2 - height as i32 / 2),
                 "top" => (nx + nw / 2 - width as i32 / 2, ny + pill),
-                "bottom" => (nx + nw / 2 - width as i32 / 2, ny + nh - pill - height as i32),
-                _ => (nx + nw - pill - width as i32, ny + nh / 2 - height as i32 / 2),
+                "bottom" => (
+                    nx + nw / 2 - width as i32 / 2,
+                    ny + nh - pill - height as i32,
+                ),
+                _ => (
+                    nx + nw - pill - width as i32,
+                    ny + nh / 2 - height as i32 / 2,
+                ),
             }
         }
         // The notch window could not be measured (very unlikely, since it exists from launch): fall
@@ -231,13 +322,20 @@ fn show_on_main(app: &AppHandle, event: ResetEvent, token: u64) -> Result<(), St
         None => {
             let inset = ((if visible { 100.0 } else { 8.0 }) * density).round() as i32;
             let along = |span: i32, len: i32| {
-                ((span as f64 * 0.5 - len as f64 / 2.0).round() as i32).clamp(0, (span - len).max(0))
+                ((span as f64 * 0.5 - len as f64 / 2.0).round() as i32)
+                    .clamp(0, (span - len).max(0))
             };
             match edge.as_str() {
                 "left" => (ax + inset, ay + along(ah, height as i32)),
                 "top" => (ax + along(aw, width as i32), ay + inset),
-                "bottom" => (ax + along(aw, width as i32), ay + ah - height as i32 - inset),
-                _ => (ax + aw - width as i32 - inset, ay + along(ah, height as i32)),
+                "bottom" => (
+                    ax + along(aw, width as i32),
+                    ay + ah - height as i32 - inset,
+                ),
+                _ => (
+                    ax + aw - width as i32 - inset,
+                    ay + along(ah, height as i32),
+                ),
             }
         }
     };
@@ -249,13 +347,22 @@ fn show_on_main(app: &AppHandle, event: ResetEvent, token: u64) -> Result<(), St
     // Moving a freshly built window onto a monitor at a different scale than the one it was created
     // on can have Windows silently reconvert its physical size for the new monitor — the same quirk
     // `place_notch` works around at 125 %/150 %. Re-checked and, if needed, redone once, the same way.
-    if window.outer_size().map(|s| (s.width, s.height) != (width, height)).unwrap_or(false) {
+    if window
+        .outer_size()
+        .map(|s| (s.width, s.height) != (width, height))
+        .unwrap_or(false)
+    {
         let _ = window.set_size(tauri::PhysicalSize::new(width, height));
         let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
     }
     window.show().map_err(|e| e.to_string())?;
 
-    let sound_on = app.state::<AppState>().cfg.lock().unwrap().reset_notification_sound;
+    let sound_on = app
+        .state::<AppState>()
+        .cfg
+        .lock()
+        .unwrap()
+        .reset_notification_sound;
     if sound_on {
         play_notification_sound();
     }
@@ -328,9 +435,25 @@ fn close(app: &AppHandle) {
 pub fn disable(app: &AppHandle) {
     let queue = &app.state::<AppState>().reset_alerts;
     let mut state = queue.state.lock().unwrap();
-    state.pending.clear();
-    state.dismissed = true;
-    queue.changed.notify_all();
+    state
+        .pending
+        .retain(|queued| matches!(&queued.event, AlertEvent::Global(_)));
+    if !state.active_global {
+        state.dismissed = true;
+        queue.changed.notify_all();
+    }
+}
+
+pub fn disable_global(app: &AppHandle) {
+    let queue = &app.state::<AppState>().reset_alerts;
+    let mut state = queue.state.lock().unwrap();
+    state
+        .pending
+        .retain(|queued| matches!(&queued.event, AlertEvent::Personal(_)));
+    if state.active_global {
+        state.dismissed = true;
+        queue.changed.notify_all();
+    }
 }
 
 #[tauri::command]
@@ -351,12 +474,30 @@ pub fn preview_reset_alert(app: AppHandle) -> Result<(), String> {
     let now = crate::now_ms();
     enqueue_unchecked(
         &app,
-        ResetEvent {
+        AlertEvent::Personal(ResetEvent {
             provider: "codex".into(),
             window_label: "5h limit".into(),
             used_fraction: 0.0,
             next_reset_at: Some(now + 300 * 60_000),
-        },
+        }),
+        true,
+    );
+    Ok(())
+}
+
+pub fn preview_global(app: AppHandle) -> Result<(), String> {
+    if crate::target_screen(&app).is_none() {
+        return Err("No display available for the reset card".into());
+    }
+    enqueue_unchecked(
+        &app,
+        AlertEvent::Global(crate::global_reset::ConfirmedReset {
+            id: "preview".into(),
+            announced_at: crate::now_ms(),
+            summary: "Preview of the confirmed global reset card".into(),
+            url: Some(crate::global_reset::SOURCE_URL.into()),
+            audience: vec!["codex".into(), "chatgpt_work".into()],
+        }),
         true,
     );
     Ok(())

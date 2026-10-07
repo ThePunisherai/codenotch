@@ -69,3 +69,20 @@ test('hidden notch still renders only the card and keeps an accessible dismiss c
   assert.equal(view.calls[0][0], 'dismiss_reset_alert');
   assert.equal(view.calls[0][1].token, 42);
 });
+
+test('global announcements get a separate surface and a source button with a fixed destination', () => {
+  const view = render({kind:'global_reset', scope:'global', source_url:'javascript:doNotOpen()', source_label:'View announcement',
+    title:'Codex / ChatGPT Work reset', subtitle:'Global reset announced', status:'Check your account usage', next:'Source: codex-reset.com'});
+  assert.equal(view.document.body.dataset.scope, 'global');
+  assert.equal(view.node('status').textContent, 'Check your account usage');
+  assert.equal(view.node('source').hidden, false);
+  view.node('source').handlers.click();
+  assert.equal(view.calls[0][0], 'open_global_reset_source');
+  assert.equal(view.calls[0][1], undefined);
+});
+
+test('personal quota cards keep their scope and never show an announcement source button', () => {
+  const view = render({scope:'personal', kind:'quota_reset', source_label:''});
+  assert.equal(view.document.body.dataset.scope, 'personal');
+  assert.equal(view.node('source').hidden, true);
+});

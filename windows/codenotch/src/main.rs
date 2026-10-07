@@ -17,6 +17,7 @@ mod claude_auth;
 mod codex;
 mod reset_watch;
 mod reset_alert;
+mod global_reset;
 mod cursor;
 mod grok;
 mod copilot;
@@ -41,7 +42,7 @@ use tauri::{AppHandle, Emitter, Manager};
 /// and its tail on the left. `fitZoom` in ui/notch.html divides by the same width.
 pub const NOTCH_W: f64 = 360.0;
 /// Hand-bumped build tag, written to run.log at startup so a log can always be matched to the exe that wrote it.
-pub const BUILD: &str = "r33";
+pub const BUILD: &str = "r34-reset-tracker";
 /// The notch window's long side: the upright window's height, and both sides of the flat one.
 ///
 /// Five cells make a 447 px pill; its fillets add 38.7 px at each end and the settings orb reaches
@@ -57,6 +58,7 @@ pub struct AppState {
     /// Codex snapshot (same UsageSnapshot shape; status may also be none/absent)
     pub codex: Mutex<usage::UsageSnapshot>,
     pub reset_alerts: reset_alert::AlertQueue,
+    pub global_resets: Mutex<global_reset::Store>,
     pub cursor: Mutex<usage::UsageSnapshot>,
     /// Grok Build credits, read from the Grok CLI's own session
     pub grok: Mutex<usage::UsageSnapshot>,
@@ -1815,6 +1817,7 @@ fn main() {
             usage: Mutex::new(usage::load_persisted()),
             codex: Mutex::new(codex::load_persisted()),
             reset_alerts: reset_alert::AlertQueue::default(),
+            global_resets: Mutex::new(global_reset::load_persisted()),
             cursor: Mutex::new(cursor::load_persisted()),
             grok: Mutex::new(grok::load_persisted()),
             copilot: Mutex::new(copilot::load_persisted()),
@@ -1840,6 +1843,11 @@ fn main() {
             set_reset_notification_sound,
             reset_alert::preview_reset_alert,
             reset_alert::dismiss_reset_alert,
+            global_reset::get_global_reset_state,
+            global_reset::refresh_global_resets,
+            global_reset::set_global_reset_notifications,
+            global_reset::preview_global_reset_alert,
+            global_reset::open_global_reset_source,
             get_cursor,
             get_grok,
             get_copilot,
@@ -1934,6 +1942,7 @@ fn main() {
             opencode::start(handle.clone());
             activity::start(handle.clone());
             reset_watch::start(handle.clone());
+            global_reset::start(handle.clone());
             // Collecting glyphs may read icon resources out of a few executables; do it off the main thread and push when done
             let gh = handle.clone();
             std::thread::spawn(move || reload_glyphs(&gh));

@@ -1,10 +1,10 @@
 [package]
 name = "codenotch"
-version = "1.22.0"
+version = "1.22.1"
 edition = "2021"
 description = "Codenotch for Windows — usage notch for Claude, Codex, Cursor and Antigravity"
 license = "MIT"
-repository = "https://github.com/Im-Midi/codenotch-windows"
+repository = "https://github.com/ThePunisherai/codenotch"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

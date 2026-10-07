@@ -126,6 +126,10 @@ pub struct Config {
     /// Show a temporary card when any provider (Claude, Codex, Cursor, …) renews a used quota window.
     #[serde(default = "yes")]
     pub reset_notifications: bool,
+    /// Confirmed global Codex / ChatGPT Work announcements from codex-reset.com, separate from
+    /// account quota renewals. Historical forecasts and hints never trigger this card.
+    #[serde(default = "yes")]
+    pub global_reset_notifications: bool,
     /// false = the reset card above appears silently, with no notification sound.
     #[serde(default = "yes")]
     pub reset_notification_sound: bool,
@@ -307,6 +311,7 @@ impl Default for Config {
             notch_on_hover: true,
             tray_visible: true,
             reset_notifications: true,
+            global_reset_notifications: true,
             reset_notification_sound: true,
             adaptive_pill: false,
         }
@@ -430,13 +435,15 @@ mod tests {
     fn reset_switches_default_on_and_round_trip_without_changing_other_settings() {
         let old: Config = serde_json::from_str(r#"{"notch_visible":false,"theme":"light"}"#).unwrap();
         assert!(old.reset_notifications);
+        assert!(old.global_reset_notifications);
         assert!(old.reset_notification_sound);
         assert!(!old.notch_visible);
         assert_eq!(old.theme, "light");
-        let chosen = Config { reset_notifications: false, reset_notification_sound: false, ..old };
+        let chosen = Config { reset_notifications: false, global_reset_notifications: false, reset_notification_sound: false, ..old };
         let saved = serde_json::to_string(&chosen).unwrap();
         let restored: Config = serde_json::from_str(&saved).unwrap();
         assert!(!restored.reset_notifications);
+        assert!(!restored.global_reset_notifications);
         assert!(!restored.reset_notification_sound);
         assert!(!restored.notch_visible);
         assert_eq!(restored.theme, "light");
