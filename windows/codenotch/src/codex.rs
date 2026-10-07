@@ -26,8 +26,10 @@
 //!      eight paths). If unavailable, retain the bounded three-date-directory scan. A resumed
 //!      old thread keeps its creation directory, but the index records its latest activity.
 //!
-//! Credentials are borrowed, never managed: the numbers come from Codex's own sign-in and Codex's
-//! own endpoint. No sign-in and no session history at all means absent (no cell is shown).
+//! Numbers come from Codex's own sign-in and endpoint. The selected CODEX_HOME also owns
+//! native-client recovery, rollout fallback and its cache. Settings may explicitly launch the
+//! installed CLI to sign in to an isolated profile; only that CLI writes its OAuth credential.
+//! No sign-in and no session history at all means absent (no cell is shown).
 
 use crate::usage::{LimitWindow, UsageSnapshot};
 use crate::AppState;
@@ -36,7 +38,6 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager};
 
-const POLL_SECS: u64 = 300; // Preserve the upstream cadence; a tray refresh interrupts it.
 const TAIL_BYTES: u64 = 256 * 1024;
 const CURRENT_FOR_MS: u64 = 5 * 60 * 1000;
 const ENDPOINT: &str = "https://chatgpt.com/backend-api/wham/usage";
@@ -67,11 +68,13 @@ fn now_ms() -> u64 {
 }
 
 fn codex_home() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".codex"))
+    crate::accounts::active("codex").map(|p| p.root)
+        .or_else(|| std::env::var_os("CODEX_HOME").filter(|p| !p.is_empty()).map(PathBuf::from))
+        .or_else(|| dirs::home_dir().map(|h| h.join(".codex")))
 }
 
 fn store_path() -> PathBuf {
-    crate::config::config_path().with_file_name("codex.json")
+    crate::accounts::cache_path("codex", "codex.json")
 }
 
 pub fn load_persisted() -> UsageSnapshot {
@@ -88,10 +91,11 @@ pub fn load_persisted() -> UsageSnapshot {
         .unwrap_or_default()
 }
 
-fn persist(s: &UsageSnapshot) {
-    if let Ok(t) = serde_json::to_string_pretty(s) {
-        let _ = std::fs::write(store_path(), t);
-    }
+fn persist(s: &UsageSnapshot) { persist_at(&store_path(), s); }
+
+fn persist_at(path: &Path, s: &UsageSnapshot) {
+    if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
+    if let Ok(t) = serde_json::to_string_pretty(s) { let _ = std::fs::write(path, t); }
 }
 
 // ---------------- Locating the executable ----------------
@@ -124,6 +128,13 @@ pub fn find_executable() -> Option<PathBuf> {
                         cands.push(p);
                     }
                 }
+            }
+        }
+        // Current npm releases keep the native binary in a platform-specific optional package.
+        for platform in ["codex-win32-x64", "codex-win32-arm64"] {
+            let vendor = appdata.join("npm/node_modules/@openai").join(platform).join("vendor");
+            for triple in ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"] {
+                cands.push(vendor.join(triple).join("codex/codex.exe"));
             }
         }
         for n in crate::usage::command_names("codex") {
@@ -167,12 +178,17 @@ fn jwt_claims(token: &str) -> Option<serde_json::Value> {
 }
 
 /// Reads Codex's sign-in state; a missing file or missing field both mean "not signed in"
-fn load_credential() -> Option<Credential> {
-    let text = std::fs::read_to_string(auth_path()?).ok()?;
+fn load_credential() -> Option<Credential> { load_credential_in(&codex_home()?) }
+
+fn load_credential_in(home: &Path) -> Option<Credential> {
+    let text = std::fs::read_to_string(home.join("auth.json")).ok()?;
     let v: serde_json::Value = serde_json::from_str(&text).ok()?;
     let tokens = v.get("tokens")?;
     let access_token = tokens.get("access_token")?.as_str()?.trim().to_string();
-    let account_id = tokens.get("account_id")?.as_str()?.trim().to_string();
+    let claims = tokens.get("id_token").and_then(|x| x.as_str()).and_then(jwt_claims);
+    let account_id = tokens.get("account_id").and_then(|x| x.as_str())
+        .or_else(|| claims.as_ref()?.pointer("/https:~1~1api.openai.com~1auth/chatgpt_account_id")?.as_str())?
+        .trim().to_string();
     if access_token.is_empty() || account_id.is_empty() {
         return None;
     }
@@ -528,7 +544,22 @@ fn native_codex() -> Option<PathBuf> {
             return Some(exe);
         }
     }
-    find_executable().filter(|p| p.extension().and_then(|x| x.to_str()) == Some("exe"))
+    #[cfg(windows)]
+    if let Some(program_files) = std::env::var_os("ProgramFiles") {
+        // The Store build and the standalone CLI share the same account API. Read only
+        // known Codex package directories; inability to enumerate is an ordinary fallback.
+        if let Ok(entries) = std::fs::read_dir(PathBuf::from(program_files).join("WindowsApps")) {
+            for entry in entries.flatten() {
+                if !entry.file_name().to_string_lossy().to_ascii_lowercase().starts_with("openai.codex_") { continue; }
+                for relative in ["app/resources/codex.exe", "resources/codex.exe", "codex.exe"] {
+                    let path = entry.path().join(relative);
+                    if path.is_file() { return Some(path); }
+                }
+            }
+        }
+    }
+    find_executable().filter(|p| p.extension().and_then(|x| x.to_str())
+        .is_some_and(|x| x.eq_ignore_ascii_case("exe")))
 }
 
 fn app_server_snapshot(result: &serde_json::Value) -> Option<UsageSnapshot> {
@@ -558,11 +589,12 @@ fn app_server_snapshot(result: &serde_json::Value) -> Option<UsageSnapshot> {
         note: "via Codex app-server".into(), ..Default::default() })
 }
 
-fn read_app_server() -> Option<UsageSnapshot> {
+fn read_app_server(home: &Path) -> Option<UsageSnapshot> {
     use std::io::{BufRead, BufReader, Write};
     use std::process::{Command, Stdio};
     let mut command = Command::new(native_codex()?);
-    command.arg("app-server").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+    command.arg("app-server").env("CODEX_HOME", home).env_remove("OPENAI_API_KEY").env_remove("CODEX_API_KEY")
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
     #[cfg(windows)]
     { use std::os::windows::process::CommandExt; command.creation_flags(0x0800_0000); }
     let mut child = command.spawn().ok()?;
@@ -600,14 +632,16 @@ fn read_app_server() -> Option<UsageSnapshot> {
 }
 
 /// Is Codex present on this machine (CLI installed, signed in, or has had sessions)? If not, no cell is shown
-pub fn present() -> bool {
+pub fn present() -> bool { codex_home().map(|h| present_in(&h)).unwrap_or(false) }
+
+fn present_in(home: &Path) -> bool {
     native_codex().is_some()
         || find_executable().is_some()
-        || auth_path().map(|p| p.is_file()).unwrap_or(false)
-        || codex_home().map(|h| h.join("sessions").is_dir()).unwrap_or(false)
+        || home.join("auth.json").is_file()
+        || home.join("sessions").is_dir()
 }
 
-fn read_once() -> UsageSnapshot {
+fn read_once(home: &Path) -> UsageSnapshot {
     let mut snap = UsageSnapshot::default();
     // Note attached to the fallback reading when the live read failed; needs_auth picks the empty state when there is no fallback either
     let mut live_note: Option<String> = None;
@@ -618,9 +652,9 @@ fn read_once() -> UsageSnapshot {
         snap.backoff_until = held_until;
         live_note = Some(format!("Rate limited — retrying in {}s", (held_until - now) / 1000));
     } else {
-        match load_credential() {
+        match load_credential_in(home) {
             None => {
-                if auth_path().map(|p| p.is_file()).unwrap_or(false) {
+                if home.join("auth.json").is_file() {
                     crate::applog("codex: auth.json has no usable access_token/account_id, falling back to the rollout");
                 }
             }
@@ -666,7 +700,7 @@ fn read_once() -> UsageSnapshot {
     if snap.backoff_until <= now_ms()
         && NATIVE_RETRY_AFTER.load(std::sync::atomic::Ordering::Relaxed) <= now_ms()
     {
-        match read_app_server() {
+        match read_app_server(home) {
             Some(native) => return native,
             None => NATIVE_RETRY_AFTER.store(
                 now_ms() + NATIVE_STAND_DOWN_MS,
@@ -675,7 +709,7 @@ fn read_once() -> UsageSnapshot {
         }
     }
     // Fallback: rollout
-    match newest_rollout().and_then(|p| tail_text(&p)).and_then(|t| snapshot_from_rollout(&t)) {
+    match newest_rollout_in(home).and_then(|p| tail_text(&p)).and_then(|t| snapshot_from_rollout(&t)) {
         Some((windows, recorded, plan)) => {
             let rec = recorded.unwrap_or(0);
             let fresh = rec > 0 && now_ms().saturating_sub(rec) <= CURRENT_FOR_MS;
@@ -693,7 +727,7 @@ fn read_once() -> UsageSnapshot {
         None => {
             snap.status = if needs_auth {
                 "needsAuth"
-            } else if present() {
+            } else if present_in(home) {
                 "none"
             } else {
                 "absent"
@@ -701,10 +735,22 @@ fn read_once() -> UsageSnapshot {
             .into();
             snap.note = match live_note {
                 Some(n) => n,
-                None if present() => "Codex has not recorded a usage snapshot yet".into(),
+                None if present_in(home) => "Codex has not recorded a usage snapshot yet".into(),
                 None => String::new(),
             };
         }
+    }
+    snap
+}
+
+/// Isolated profiles do not necessarily have rollout history. An HTTP error or
+/// Retry-After must keep their last real quota, with its original timestamp.
+fn retain_last_reading(mut snap: UsageSnapshot, previous: &UsageSnapshot) -> UsageSnapshot {
+    if !previous.windows.is_empty() && (snap.windows.is_empty()
+        || (snap.note.contains("from last Codex run") && snap.fetched_at < previous.fetched_at)) {
+        snap.windows = previous.windows.clone();
+        snap.fetched_at = previous.fetched_at;
+        if snap.status != "needsAuth" { snap.status = "stale".into(); }
     }
     snap
 }
@@ -717,47 +763,134 @@ fn cap(s: &str) -> String {
     }
 }
 
-fn broadcast(app: &AppHandle, snap: UsageSnapshot) {
-    let st = app.state::<AppState>();
-    *st.codex.lock().unwrap() = snap.clone();
-    persist(&snap);
-    let _ = app.emit("codex", &snap);
+fn broadcast(app: &AppHandle, selection: &str, snap: UsageSnapshot) -> bool {
+    crate::accounts::with_selection("codex", selection, || {
+        let st = app.state::<AppState>();
+        *st.codex.lock().unwrap() = snap.clone();
+        persist(&snap);
+        let _ = app.emit("codex", &snap);
+    }).is_some()
 }
 
 pub fn start(app: AppHandle) {
     std::thread::spawn(move || {
-        {
-            let st = app.state::<AppState>();
-            let snap = st.codex.lock().unwrap().clone();
-            let _ = app.emit("codex", &snap);
-        }
-        if !present() {
-            broadcast(&app, UsageSnapshot { status: "absent".into(), ..Default::default() });
-            // Codex is not installed: look again every 10 minutes
-            loop {
-                for _ in 0..600 {
-                    if REFRESH.swap(false, std::sync::atomic::Ordering::Relaxed) {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_secs(1));
-                }
-                if present() {
-                    break;
-                }
-            }
-        }
+        let mut selection = String::new();
+        let mut previous_root: Option<PathBuf> = None;
+        let mut native_deadlines = std::collections::HashMap::<PathBuf, u64>::new();
         loop {
-            let snap = read_once();
-            let hold = snap.backoff_until.saturating_sub(now_ms()) / 1000;
-            broadcast(&app, snap);
-            for _ in 0..POLL_SECS.max(hold) {
-                if REFRESH.swap(false, std::sync::atomic::Ordering::Relaxed) {
-                    break;
+            let current = crate::accounts::selection_key("codex");
+            let Some((home, cache)) = crate::accounts::with_selection("codex", &current,
+                || (codex_home(), store_path())) else { continue; };
+            let Some(home) = home else { std::thread::sleep(Duration::from_secs(1)); continue; };
+            if current != selection {
+                if let Some(previous_root) = &previous_root {
+                    native_deadlines.insert(previous_root.clone(), NATIVE_RETRY_AFTER.load(std::sync::atomic::Ordering::Relaxed));
                 }
+                selection = current;
+                previous_root = Some(home.clone());
+                NATIVE_RETRY_AFTER.store(*native_deadlines.get(&home).unwrap_or(&0), std::sync::atomic::Ordering::Relaxed);
+                let mut previous = std::fs::read_to_string(&cache).ok()
+                    .and_then(|t| serde_json::from_str::<UsageSnapshot>(&t).ok()).unwrap_or_default();
+                if !previous.windows.is_empty() { previous.status = "stale".into(); }
+                BACKOFF_UNTIL.store(previous.backoff_until, std::sync::atomic::Ordering::Relaxed);
+                broadcast(&app, &selection, previous);
+            }
+            if login_busy() { std::thread::sleep(Duration::from_secs(1)); continue; }
+            let previous = std::fs::read_to_string(&cache).ok()
+                .and_then(|t| serde_json::from_str::<UsageSnapshot>(&t).ok()).unwrap_or_default();
+            let snap = retain_last_reading(read_once(&home), &previous);
+            let hold = snap.backoff_until.saturating_sub(now_ms()) / 1000;
+            let next_reset = crate::usage::refresh_delay_secs(&snap.windows, now_ms(), 60);
+            // A switch or re-login invalidates late usage. Keep only a server backoff
+            // for the captured cache; never resurrect the previous credential's quota.
+            let backoff = snap.backoff_until;
+            if !broadcast(&app, &selection, snap) && backoff > now_ms() {
+                crate::accounts::preserve_backoff(&cache, backoff);
+            }
+            for _ in 0..next_reset.max(hold) {
+                if REFRESH.swap(false, std::sync::atomic::Ordering::Relaxed)
+                    || crate::accounts::selection_key("codex") != selection { break; }
                 std::thread::sleep(Duration::from_secs(1));
             }
         }
     });
+}
+
+static LOGIN_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn login_busy() -> bool { LOGIN_BUSY.load(std::sync::atomic::Ordering::Acquire) }
+
+struct LoginGuard;
+impl Drop for LoginGuard {
+    fn drop(&mut self) { LOGIN_BUSY.store(false, std::sync::atomic::Ordering::Release); }
+}
+
+#[cfg(windows)]
+const LOGIN_SCRIPT: &str = r#"$Host.UI.RawUI.WindowTitle = 'Codenotch - Codex / ChatGPT sign-in'; Write-Host 'Complete sign-in in your browser for this Codenotch account.'; & $env:CODENOTCH_CODEX_CLI -c "cli_auth_credentials_store='file'" login; $loginResult = $LASTEXITCODE; if ($loginResult -eq 0) { Write-Host 'Sign-in complete. Codenotch will refresh automatically.'; Start-Sleep -Seconds 2 } else { Write-Host 'Sign-in failed or cancelled. Retry from Codenotch.'; Start-Sleep -Seconds 8 }; exit $loginResult"#;
+
+#[cfg(not(windows))]
+const LOGIN_SH: &str = "echo 'Complete sign-in in your browser for this Codenotch account.'; \"$CODENOTCH_CODEX_CLI\" -c \"cli_auth_credentials_store='file'\" login; r=$?; if [ $r -eq 0 ]; then echo 'Sign-in complete. Codenotch will refresh automatically.'; sleep 2; else echo 'Sign-in failed or cancelled. Retry from Codenotch.'; sleep 8; fi; exit $r";
+
+fn login_command(cli: &Path, root: &Path) -> Result<std::process::Command, String> {
+    use std::process::Command;
+    #[cfg(windows)]
+    let mut cmd = {
+        use std::os::windows::process::CommandExt;
+        let windows = std::env::var_os("SystemRoot").ok_or("Windows directory unavailable.")?;
+        let mut cmd = Command::new(PathBuf::from(windows).join("System32/WindowsPowerShell/v1.0/powershell.exe"));
+        cmd.args(["-NoLogo", "-NoProfile", "-Command", LOGIN_SCRIPT]);
+        cmd.creation_flags(0x0000_0010); // Visible console only after the settings button is clicked.
+        cmd
+    };
+    #[cfg(not(windows))]
+    let mut cmd = {
+        let terminal = crate::claude_auth::terminal_emulator().ok_or("No terminal emulator found. Run codex login yourself.")?;
+        let mut cmd = Command::new(terminal);
+        cmd.args(["-e", "sh", "-c", LOGIN_SH]);
+        cmd
+    };
+    cmd.env("CODENOTCH_CODEX_CLI", cli).env("CODEX_HOME", root)
+        .env_remove("OPENAI_API_KEY").env_remove("CODEX_API_KEY");
+    cmd.current_dir(root);
+    Ok(cmd)
+}
+
+pub fn login_profile(app: &AppHandle, profile_id: &str, root: PathBuf) -> Result<(), String> {
+    let cli = native_codex().or_else(find_executable)
+        .ok_or("Codex CLI not found. Install the official Codex CLI first.")?;
+    std::fs::create_dir_all(&root).map_err(|_| "Unable to create the account directory.")?;
+    LOGIN_BUSY.compare_exchange(false, true, std::sync::atomic::Ordering::AcqRel,
+        std::sync::atomic::Ordering::Acquire).map_err(|_| "Codex sign-in is already running.")?;
+    let guard = LoginGuard;
+    let mut child = login_command(&cli, &root)?.spawn().map_err(|_| "Unable to open Codex sign-in window.")?;
+    let app = app.clone();
+    let profile_id = profile_id.to_owned();
+    crate::claude_auth::emit_profile_login(&app, "codex", &profile_id, true, "Complete sign-in in your browser.");
+    std::thread::spawn(move || {
+        let ok = crate::claude_auth::wait_child(&mut child, Duration::from_secs(15 * 60));
+        let signed_in = ok && load_credential_in(&root).is_some();
+        let note = if signed_in { "Sign-in complete. Refreshing usage..." } else {
+            "Sign-in cancelled, failed or timed out. Try again."
+        };
+        drop(guard);
+        if signed_in { crate::accounts::login_finished(&app, "codex", &profile_id); }
+        crate::claude_auth::emit_profile_login(&app, "codex", &profile_id, false, note);
+        if crate::accounts::active("codex").is_some_and(|p| p.id == profile_id) {
+            NATIVE_RETRY_AFTER.store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+        request_refresh();
+    });
+    Ok(())
+}
+
+/// Account identity for labels only. Claims are unverified; the usage endpoint verifies auth.
+pub fn profile_has_credential(root: &Path) -> bool { load_credential_in(root).is_some() }
+
+pub fn profile_identity(root: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(root.join("auth.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let claims = v.pointer("/tokens/id_token").and_then(|x| x.as_str()).and_then(jwt_claims)?;
+    claims.get("email").and_then(|x| x.as_str()).filter(|s| s.len() <= 254).map(str::to_owned)
 }
 
 /// For doctor: contains no secrets
@@ -791,6 +924,56 @@ pub fn probe() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rate_limit_keeps_an_isolated_accounts_last_true_reading() {
+        let previous = UsageSnapshot { status: "ok".into(), windows: vec![LimitWindow {
+            id: "primary".into(), used: 0.42, ..Default::default()
+        }], fetched_at: 12345, ..Default::default() };
+        let fresh = UsageSnapshot { status: "none".into(), backoff_until: 90000,
+            note: "Rate limited".into(), ..Default::default() };
+        let held = retain_last_reading(fresh, &previous);
+        assert_eq!(held.windows[0].used, 0.42);
+        assert_eq!(held.fetched_at, 12345);
+        assert_eq!(held.backoff_until, 90000);
+        assert_eq!(held.status, "stale");
+        let live = UsageSnapshot { status: "ok".into(), windows: vec![LimitWindow {
+            id: "primary".into(), used: 0.0, ..Default::default()
+        }], fetched_at: 22345, ..Default::default() };
+        assert_eq!(retain_last_reading(live, &previous).windows[0].used, 0.0);
+    }
+
+    #[test]
+    fn credentials_are_read_only_from_the_requested_account_root() {
+        let root = std::env::temp_dir().join(format!("codenotch-codex-accounts-{}-{}", std::process::id(), now_ms()));
+        let a = root.join("a");
+        let b = root.join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        for (dir, id) in [(&a, "account-a"), (&b, "account-b")] {
+            std::fs::write(dir.join("auth.json"), serde_json::json!({
+                "tokens": {"access_token":"fixture-token", "account_id":id}
+            }).to_string()).unwrap();
+        }
+        assert_eq!(load_credential_in(&a).unwrap().account_id, "account-a");
+        assert_eq!(load_credential_in(&b).unwrap().account_id, "account-b");
+        assert!(load_credential_in(&root.join("missing")).is_none());
+        assert!(profile_identity(&a).is_none()); // no synthetic identity inferred from a token
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn sign_in_paths_and_account_root_are_environment_data() {
+        let cli = Path::new(r"C:\fixture with spaces\O'Brien\codex.cmd");
+        let root = Path::new(r"C:\fixture with spaces\profiles\work");
+        let cmd = login_command(cli, root).unwrap();
+        assert!(cmd.get_args().all(|a| !a.to_string_lossy().contains("O'Brien")));
+        assert!(cmd.get_envs().any(|(k, v)| k == "CODEX_HOME" && v == Some(root.as_os_str())));
+        assert!(cmd.get_envs().any(|(k, v)| k == "CODENOTCH_CODEX_CLI" && v == Some(cli.as_os_str())));
+        assert!(cmd.get_envs().any(|(k, v)| k == "OPENAI_API_KEY" && v.is_none()));
+        assert!(LOGIN_SCRIPT.contains("cli_auth_credentials_store='file'"));
+    }
 
     #[test]
     fn app_server_uses_core_bucket_not_legacy_spark() {
@@ -929,7 +1112,7 @@ mod tests {
     #[test]
     #[ignore = "Reads quota through the installed signed-in native Codex client; opt in explicitly"]
     fn live_native_quota() {
-        let snap = read_app_server().expect("native quota read should succeed for this signed-in client");
+        let snap = read_app_server(&codex_home().expect("Codex home")).expect("native quota read should succeed for this signed-in client");
         assert_eq!(snap.status, "ok");
         assert!(!snap.windows.is_empty());
         assert!(snap.windows.iter().all(|window| matches!(window.id.as_str(), "primary" | "secondary")));

@@ -83,7 +83,7 @@ test('an aged account reading stays marked stale even if its last successful sta
 test('an in-progress background check disables refresh while leaving cached content visible', () => {
   const page = view();
   page.render({...state,refreshing:true});
-  assert.equal(page.node('reset-feed').textContent, 'Checking…');
+  assert.equal(page.node('reset-feed').textContent, 'LIVE · syncing');
   assert.equal(page.node('btn-reset-refresh').disabled, true);
   assert.equal(page.node('reset-summary').textContent, event.summary);
 });
@@ -127,7 +127,7 @@ test('a newer event wins over an initial state read that finishes late', async (
   resolve({status:'loading', last_reset:null});
   await read;
   assert.equal(page.node('reset-latest-title').textContent, 'Latest global reset');
-  assert.equal(page.node('reset-feed').textContent, 'Live feed');
+  assert.equal(page.node('reset-feed').textContent, 'LIVE');
 });
 
 test('a completed worker event wins over a late manual refresh command response', async () => {
@@ -139,7 +139,7 @@ test('a completed worker event wins over a late manual refresh command response'
   resolve({status:'loading',refreshing:true,last_reset:null});
   await refreshing;
   assert.equal(page.node('reset-latest-title').textContent, 'Latest global reset');
-  assert.equal(page.node('reset-feed').textContent, 'Live feed');
+  assert.equal(page.node('reset-feed').textContent, 'LIVE');
   assert.equal(page.node('btn-reset-refresh').disabled, false);
 });
 
@@ -160,4 +160,47 @@ test('notification toggle displays the persisted command result when a follow-up
   assert.equal(page.calls[0][1].on, false);
   assert.equal(page.node('sw-global-reset').attributes['aria-checked'], 'false');
   assert.equal(page.node('sw-global-reset').disabled, false);
+});
+
+test('LIVE requires a fresh successful own check and a current public source', () => {
+  const page = view();
+  page.render({...state,checked_at:NOW,fetched_at:NOW-999999});
+  assert.equal(page.node('reset-feed').textContent,'LIVE');
+  page.render({...state,checked_at:NOW-91000});
+  assert.equal(page.node('reset-feed').textContent,'Saved feed');
+  page.render({...state,checked_at:NOW,cached:true});
+  assert.equal(page.node('reset-feed').textContent,'Saved feed');
+  page.render({...state,checked_at:NOW,feed:{stale:true}});
+  assert.equal(page.node('reset-feed').textContent,'Source delayed');
+  page.render({...state,checked_at:NOW,source_expires_at:NOW-1});
+  assert.equal(page.node('reset-feed').textContent,'Source delayed');
+});
+
+test('next public check has a visible second-by-second countdown separate from account reset clocks', () => {
+  const page=view();page.render({...state,checked_at:NOW-12000,next_check_at:NOW+45000});
+  assert.equal(page.node('reset-updated').textContent,'Checked 12s ago');
+  assert.equal(page.node('reset-next-check').textContent,'Next check 0:45');
+  assert.equal(page.context.resetCheckCountdown(NOW+6000,NOW),'Next check 0:06');
+});
+
+test('banked availability describes the public lifecycle and never reports an own credit balance', () => {
+  const page=view();page.render({...state,banked:{...event,kind:'banked',banked_state:'available',summary:'Fixture public banked update'},banked_notifications:true});
+  assert.equal(page.node('reset-banked-state').textContent,'Source reports available');
+  assert.match(page.node('reset-banked-detail').textContent,/not your own banked-credit balance/);
+  page.render({...state,banked:{...event,preview:true,banked_state:'available'}});
+  assert.equal(page.node('reset-banked-state').textContent,'Unconfirmed');
+});
+
+test('public timeline includes non-reset lifecycle and signal events without marking them confirmed', () => {
+  const page=view();page.render({...state,events:[{...event,kind:'banked',banked_state:'arriving',confirmed:false},{...event,id:'signal',kind:'signal',confirmed:false}]});
+  const rows=page.node('reset-history').children;
+  assert.equal(rows[0].children[0].children[0].textContent,'banked');
+  assert.equal(rows[0].children[0].children[1].textContent,'arriving');
+  assert.equal(rows[1].children[0].children[1].textContent,'Source update');
+});
+
+test('banked preview uses its own endpoint and leaves the personal and global reset commands alone',async()=>{
+  const page=view();const button=page.node('btn-banked-reset-preview');
+  await button.handlers.click({currentTarget:button});
+  assert.equal(page.calls[0][0],'preview_banked_reset_alert');assert.equal(button.disabled,false);
 });

@@ -48,11 +48,29 @@ fn now_ms() -> u64 {
 
 /// Windows: %APPDATA%\Cursor\User\globalStorage\state.vscdb (macOS: ~/Library/Application Support/Cursor/...)
 pub fn store_url() -> Option<PathBuf> {
-    dirs::config_dir().map(|c| c.join("Cursor").join("User").join("globalStorage").join("state.vscdb"))
+    if let Some(profile) = crate::accounts::active("cursor") {
+        return Some(profile.credential_path.unwrap_or_else(|| {
+            profile
+                .root
+                .join("User")
+                .join("globalStorage")
+                .join("state.vscdb")
+        }));
+    }
+    external_store_url()
+}
+
+fn external_store_url() -> Option<PathBuf> {
+    dirs::config_dir().map(|c| {
+        c.join("Cursor")
+            .join("User")
+            .join("globalStorage")
+            .join("state.vscdb")
+    })
 }
 
 fn store_path() -> PathBuf {
-    crate::config::config_path().with_file_name("cursor.json")
+    crate::accounts::cache_path("cursor", "cursor.json")
 }
 
 pub fn load_persisted() -> UsageSnapshot {
@@ -68,14 +86,8 @@ pub fn load_persisted() -> UsageSnapshot {
         .unwrap_or_default()
 }
 
-fn persist(s: &UsageSnapshot) {
-    if let Ok(t) = serde_json::to_string_pretty(s) {
-        let _ = std::fs::write(store_path(), t);
-    }
-}
-
 pub fn present() -> bool {
-    store_url().map(|p| p.is_file()).unwrap_or(false)
+    crate::accounts::active("cursor").is_some() || store_url().map(|p| p.is_file()).unwrap_or(false)
 }
 
 // ---------------- SQLite, read only ----------------
@@ -91,25 +103,39 @@ fn open_ro(path: &std::path::Path) -> Option<rusqlite::Connection> {
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     ) {
         // Actually verify that reads work (with the -shm missing, open can succeed and the first query fail)
-        if c.prepare("SELECT 1 FROM ItemTable LIMIT 1").and_then(|mut s| s.query([]).map(|_| ())).is_ok() {
+        if c.prepare("SELECT 1 FROM ItemTable LIMIT 1")
+            .and_then(|mut s| s.query([]).map(|_| ()))
+            .is_ok()
+        {
             return Some(c);
         }
     }
     // Only the URI form takes immutable=1; a Windows path becomes file:///C:/... with \ → /
     let mut uri = String::from("file:///");
-    uri.push_str(&path.to_string_lossy().replace('\\', "/").trim_start_matches('/').replace('#', "%23").replace('?', "%3F"));
+    uri.push_str(
+        &path
+            .to_string_lossy()
+            .replace('\\', "/")
+            .trim_start_matches('/')
+            .replace('#', "%23")
+            .replace('?', "%3F"),
+    );
     uri.push_str("?immutable=1");
     rusqlite::Connection::open_with_flags(
         &uri,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_URI
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .ok()
 }
 
 fn item(conn: &rusqlite::Connection, key: &str) -> Option<String> {
-    conn.query_row("SELECT value FROM ItemTable WHERE key = ?1", [key], |r| r.get::<_, String>(0))
-        .ok()
-        .filter(|s| !s.is_empty())
+    conn.query_row("SELECT value FROM ItemTable WHERE key = ?1", [key], |r| {
+        r.get::<_, String>(0)
+    })
+    .ok()
+    .filter(|s| !s.is_empty())
 }
 
 struct Creds {
@@ -119,19 +145,62 @@ struct Creds {
 
 /// Re-read every time: the editor rotates the token, and holding on to an old value signs us out
 fn read_credentials() -> Option<Creds> {
-    let path = store_url()?;
-    let conn = open_ro(&path)?;
+    if crate::accounts::active("cursor").is_some() {
+        if let Some(secret) = crate::accounts::secret("cursor") {
+            return credential_from_saved(&secret);
+        }
+    }
+    credentials_at(&store_url()?)
+}
+
+fn credential_from_saved(secret: &str) -> Option<Creds> {
+    let v: serde_json::Value = serde_json::from_str(secret).ok()?;
+    let token = v.get("accessToken")?.as_str()?.trim();
+    let auth_id = v.get("authId")?.as_str()?.trim();
+    if token.is_empty() || auth_id.is_empty() {
+        return None;
+    }
+    Some(Creds {
+        cookie: format!("WorkosCursorSessionToken={auth_id}::{token}"),
+        plan: v.get("plan").and_then(|v| v.as_str()).map(String::from),
+    })
+}
+
+/// Captures only the editor's current login; the caller encrypts this natively.
+/// This string must never be returned through IPC or written to preferences.
+pub(crate) fn capture_current_credential() -> Option<String> {
+    let conn = open_ro(&external_store_url()?)?;
+    Some(
+        serde_json::json!({
+            "accessToken": item(&conn, "cursorAuth/accessToken")?,
+            "authId": item(&conn, "cursorAuth/stripeMembershipAuthId")?,
+            "plan": item(&conn, "cursorAuth/stripeMembershipType"),
+        })
+        .to_string(),
+    )
+}
+
+fn credentials_at(path: &std::path::Path) -> Option<Creds> {
+    let conn = open_ro(path)?;
     let token = item(&conn, "cursorAuth/accessToken")?;
     let auth_id = item(&conn, "cursorAuth/stripeMembershipAuthId")?;
     let plan = item(&conn, "cursorAuth/stripeMembershipType");
-    Some(Creds { cookie: format!("WorkosCursorSessionToken={auth_id}::{token}"), plan })
+    Some(Creds {
+        cookie: format!("WorkosCursorSessionToken={auth_id}::{token}"),
+        plan,
+    })
 }
 
 /// For doctor: contains no secret values
 pub fn probe() -> String {
-    let Some(p) = store_url() else { return "Cursor: cannot locate %APPDATA%".into() };
+    let Some(p) = store_url() else {
+        return "Cursor: cannot locate %APPDATA%".into();
+    };
     if !p.is_file() {
-        return format!("Cursor: {} not found (not installed, or not signed in)", p.display());
+        return format!(
+            "Cursor: {} not found (not installed, or not signed in)",
+            p.display()
+        );
     }
     match read_credentials() {
         Some(c) => format!(
@@ -146,7 +215,8 @@ pub fn probe() -> String {
 // ---------------- Parsing ----------------
 
 fn pct(v: Option<&serde_json::Value>) -> Option<f64> {
-    v.and_then(|x| x.as_f64()).map(|p| (p / 100.0).clamp(0.0, 1.0))
+    v.and_then(|x| x.as_f64())
+        .map(|p| (p / 100.0).clamp(0.0, 1.0))
 }
 
 fn parse_iso(v: Option<&serde_json::Value>) -> Option<u64> {
@@ -158,16 +228,34 @@ fn parse_iso(v: Option<&serde_json::Value>) -> Option<u64> {
 /// usage-summary → (windows, note). When there are no windows the note says why (Unlimited / free plan without an allowance)
 pub fn parse_summary(v: &serde_json::Value) -> (Vec<LimitWindow>, String) {
     let resets_at = parse_iso(v.get("billingCycleEnd"));
-    let usage = v.get("individualUsage").cloned().unwrap_or(serde_json::Value::Null);
-    let plan = usage.get("plan").cloned().unwrap_or(serde_json::Value::Null);
+    let usage = v
+        .get("individualUsage")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let plan = usage
+        .get("plan")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
     let mut out = Vec::new();
     // Headline = the dashboard number; 0 is a reading too
     if let Some(total) = pct(plan.get("totalPercentUsed")) {
-        out.push(LimitWindow { id: "included".into(), label: "Included usage".into(), used: total, resets_at, ..Default::default() });
+        out.push(LimitWindow {
+            id: "included".into(),
+            label: "Included usage".into(),
+            used: total,
+            resets_at,
+            ..Default::default()
+        });
     }
     if let Some(api) = pct(plan.get("apiPercentUsed")) {
         if api > 0.0 {
-            out.push(LimitWindow { id: "api".into(), label: "API usage".into(), used: api, resets_at, ..Default::default() });
+            out.push(LimitWindow {
+                id: "api".into(),
+                label: "API usage".into(),
+                used: api,
+                resets_at,
+                ..Default::default()
+            });
         }
     }
     if let Some(od) = usage.get("onDemand") {
@@ -180,7 +268,8 @@ pub fn parse_summary(v: &serde_json::Value) -> (Vec<LimitWindow>, String) {
                     id: "on_demand".into(),
                     label: "On demand".into(),
                     used: (u / limit).clamp(0.0, 1.0),
-                    resets_at, ..Default::default()
+                    resets_at,
+                    ..Default::default()
                 });
             }
         }
@@ -188,7 +277,10 @@ pub fn parse_summary(v: &serde_json::Value) -> (Vec<LimitWindow>, String) {
     if !out.is_empty() {
         return (out, String::new());
     }
-    let membership = v.get("membershipType").and_then(|x| x.as_str()).unwrap_or("this");
+    let membership = v
+        .get("membershipType")
+        .and_then(|x| x.as_str())
+        .unwrap_or("this");
     let note = if v.get("isUnlimited").and_then(|x| x.as_bool()) == Some(true) {
         format!("Unlimited on the {membership} plan — nothing to meter")
     } else {
@@ -199,14 +291,33 @@ pub fn parse_summary(v: &serde_json::Value) -> (Vec<LimitWindow>, String) {
 
 enum FetchErr {
     NeedsAuth,
+    RateLimited(u64),
     Other(String),
 }
 
 fn fetch_once(cookie: &str) -> Result<serde_json::Value, FetchErr> {
-    let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(15)).build();
-    match agent.get(ENDPOINT).set("Cookie", cookie).set("Accept", "application/json").call() {
-        Ok(r) => r.into_json::<serde_json::Value>().map_err(|e| FetchErr::Other(format!("parse: {e}"))),
-        Err(ureq::Error::Status(401, _)) | Err(ureq::Error::Status(403, _)) => Err(FetchErr::NeedsAuth),
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(15))
+        .build();
+    match agent
+        .get(ENDPOINT)
+        .set("Cookie", cookie)
+        .set("Accept", "application/json")
+        .call()
+    {
+        Ok(r) => r
+            .into_json::<serde_json::Value>()
+            .map_err(|e| FetchErr::Other(format!("parse: {e}"))),
+        Err(ureq::Error::Status(401, _)) | Err(ureq::Error::Status(403, _)) => {
+            Err(FetchErr::NeedsAuth)
+        }
+        Err(ureq::Error::Status(429, response)) => Err(FetchErr::RateLimited(
+            response
+                .header("retry-after")
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(60)
+                .max(60),
+        )),
         Err(ureq::Error::Status(code, _)) => Err(FetchErr::Other(format!("HTTP {code}"))),
         Err(e) => Err(FetchErr::Other(format!("{e}"))),
     }
@@ -220,15 +331,23 @@ fn cap(s: &str) -> String {
     }
 }
 
-fn read_once(prev: &UsageSnapshot) -> UsageSnapshot {
+fn read_once(prev: &UsageSnapshot, captured: Option<Creds>) -> UsageSnapshot {
     let mut snap = prev.clone();
-    let Some(creds) = read_credentials() else {
+    if snap.backoff_until > now_ms() {
+        snap.note = format!(
+            "Rate limited — retrying in {}s",
+            snap.backoff_until.saturating_sub(now_ms()) / 1000
+        );
+        return snap;
+    }
+    let Some(creds) = captured else {
         snap.status = "needsAuth".into();
         snap.note = "Sign in to Cursor (the editor) to see usage.".into();
         return snap;
     };
     match fetch_once(&creds.cookie) {
         Ok(v) => {
+            snap.backoff_until = 0;
             let (windows, note) = parse_summary(&v);
             snap.fetched_at = now_ms();
             if windows.is_empty() {
@@ -238,7 +357,10 @@ fn read_once(prev: &UsageSnapshot) -> UsageSnapshot {
             } else {
                 snap.status = "ok".into();
                 snap.windows = windows;
-                snap.note = match (&creds.plan, v.get("membershipType").and_then(|x| x.as_str())) {
+                snap.note = match (
+                    &creds.plan,
+                    v.get("membershipType").and_then(|x| x.as_str()),
+                ) {
                     (_, Some(m)) => format!("{} · via Cursor", cap(m)),
                     (Some(p), None) => format!("{} · via Cursor", cap(p)),
                     _ => String::new(),
@@ -249,59 +371,143 @@ fn read_once(prev: &UsageSnapshot) -> UsageSnapshot {
             snap.status = "needsAuth".into();
             snap.note = "Cursor session was rejected — sign in again in the editor".into();
         }
+        Err(FetchErr::RateLimited(wait)) => {
+            snap.backoff_until = now_ms().saturating_add(wait.saturating_mul(1000));
+            snap.status = if snap.windows.is_empty() {
+                "error"
+            } else {
+                "stale"
+            }
+            .into();
+            snap.note = format!("Cursor is rate limiting; retrying in {wait}s");
+        }
         Err(FetchErr::Other(msg)) => {
             // Stale beats invented: keep the old reading, marked stale
-            snap.status = if snap.windows.is_empty() { "error" } else { "stale" }.into();
+            snap.status = if snap.windows.is_empty() {
+                "error"
+            } else {
+                "stale"
+            }
+            .into();
             snap.note = msg;
         }
     }
     snap
 }
 
-fn broadcast(app: &AppHandle, snap: UsageSnapshot) {
-    let st = app.state::<AppState>();
-    *st.cursor.lock().unwrap() = snap.clone();
-    persist(&snap);
-    let _ = app.emit("cursor", &snap);
-}
-
-fn sleep_interruptible(secs: u64) {
-    for _ in 0..secs {
-        if REFRESH.swap(false, std::sync::atomic::Ordering::Relaxed) {
-            return;
-        }
-        std::thread::sleep(Duration::from_secs(1));
-    }
+fn broadcast(app: &AppHandle, snap: UsageSnapshot, selection: &str) {
+    let _ = crate::accounts::with_selection("cursor", selection, || {
+        let st = app.state::<AppState>();
+        *st.cursor.lock().unwrap() = snap.clone();
+        let _ = app.emit("cursor", &snap);
+    });
 }
 
 pub fn start(app: AppHandle) {
     std::thread::spawn(move || {
-        {
-            let st = app.state::<AppState>();
-            let snap = st.cursor.lock().unwrap().clone();
-            let _ = app.emit("cursor", &snap);
-        }
-        if !present() {
-            broadcast(&app, UsageSnapshot { status: "absent".into(), ..Default::default() });
-            loop {
-                sleep_interruptible(600); // Cursor is not installed: look again every 10 minutes
-                if present() {
+        loop {
+            let selection = crate::accounts::selection_key("cursor");
+            // Freeze the credential and its cache while account switching is
+            // locked. Network I/O then runs without holding the settings lock.
+            let Some((prev, cache, creds, installed)) =
+                crate::accounts::with_selection("cursor", &selection, || {
+                    (
+                        load_persisted(),
+                        store_path(),
+                        read_credentials(),
+                        present(),
+                    )
+                })
+            else {
+                continue;
+            };
+            let snap = if installed {
+                read_once(&prev, creds)
+            } else {
+                UsageSnapshot {
+                    status: "absent".into(),
+                    ..Default::default()
+                }
+            };
+            let hold = snap.backoff_until.saturating_sub(now_ms()) / 1000;
+            // An old credential must not restore cached usage after a profile
+            // reconnect. Preserve only provider Retry-After on rejected reads.
+            if crate::accounts::with_selection("cursor", &selection, || {
+                crate::agy_cli::save_persisted_to(&cache, &snap)
+            })
+            .is_none()
+            {
+                crate::accounts::preserve_backoff(&cache, snap.backoff_until);
+            }
+            broadcast(&app, snap, &selection);
+            for _ in 0..POLL_SECS.max(hold) {
+                if REFRESH.swap(false, std::sync::atomic::Ordering::Relaxed) {
                     break;
                 }
+                std::thread::sleep(Duration::from_secs(1));
             }
-        }
-        loop {
-            let prev = {
-                let st = app.state::<AppState>();
-                let s = st.cursor.lock().unwrap().clone();
-                s
-            };
-            let snap = read_once(&prev);
-            if snap.status == "error" || snap.status == "stale" {
-                crate::applog(&format!("cursor: {}", snap.note));
-            }
-            broadcast(&app, snap);
-            sleep_interruptible(POLL_SECS);
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+
+    #[test]
+    fn a_selected_accounts_retry_after_is_not_bypassed_by_refresh() {
+        let prev = UsageSnapshot {
+            backoff_until: now_ms() + 120_000,
+            note: "previous".into(),
+            ..Default::default()
+        };
+        let snap = read_once(&prev, None);
+        assert_eq!(snap.backoff_until, prev.backoff_until);
+        assert!(snap.note.starts_with("Rate limited"));
+    }
+
+    use super::*;
+
+    #[test]
+    fn saved_sessions_require_their_own_token_and_auth_id() {
+        let a = credential_from_saved(r#"{"accessToken":"token-a","authId":"id-a","plan":"pro"}"#)
+            .unwrap();
+        let b = credential_from_saved(r#"{"accessToken":"token-b","authId":"id-b"}"#).unwrap();
+        assert_eq!(a.cookie, "WorkosCursorSessionToken=id-a::token-a");
+        assert_eq!(b.cookie, "WorkosCursorSessionToken=id-b::token-b");
+        assert!(credential_from_saved(r#"{"accessToken":"","authId":"id-a"}"#).is_none());
+        assert!(credential_from_saved(r#"{"accessToken":"token-a"}"#).is_none());
+    }
+
+    #[test]
+    fn explicit_editor_stores_do_not_borrow_a_different_profile() {
+        let base =
+            std::env::temp_dir().join(format!("codenotch-cursor-stores-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        for (name, token) in [("a", "token-a"), ("b", "token-b")] {
+            let path = base.join(format!("{name}.vscdb"));
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch("CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT)")
+                .unwrap();
+            conn.execute(
+                "INSERT INTO ItemTable VALUES ('cursorAuth/accessToken', ?1)",
+                [token],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO ItemTable VALUES ('cursorAuth/stripeMembershipAuthId', ?1)",
+                [name],
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            credentials_at(&base.join("a.vscdb")).unwrap().cookie,
+            "WorkosCursorSessionToken=a::token-a"
+        );
+        assert_eq!(
+            credentials_at(&base.join("b.vscdb")).unwrap().cookie,
+            "WorkosCursorSessionToken=b::token-b"
+        );
+        assert!(credentials_at(&base.join("missing.vscdb")).is_none());
+        std::fs::remove_dir_all(base).unwrap();
+    }
 }

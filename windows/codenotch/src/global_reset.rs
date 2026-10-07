@@ -12,6 +12,8 @@ pub const SOURCE_NAME: &str = "codex-reset.com";
 pub const SOURCE_URL: &str = "https://codex-reset.com/";
 const TIMELINE_URL: &str = "https://codex-reset.com/api/timeline";
 const FORECAST_URL: &str = "https://codex-reset.com/api/forecast";
+const FEED_URL: &str = "https://codex-reset.com/api/feed";
+const STATUS_URL: &str = "https://codex-reset.com/api/status-history";
 const POLL_MS: u64 = 60_000;
 const STALE_MS: u64 = 10 * 60_000;
 const MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
@@ -38,6 +40,53 @@ pub struct Forecast {
     pub updated_at: u64,
 }
 
+/// Public announcements and lifecycle updates. Banked availability belongs to the public source,
+/// never to the signed-in account, and lifecycle rows are not a count of grants.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct PublicEvent {
+    pub id: String,
+    pub announced_at: u64,
+    pub kind: String,
+    pub group: String,
+    pub announcement_state: String,
+    pub banked_state: Option<String>,
+    pub confirmed: bool,
+    pub preview: bool,
+    pub summary: String,
+    pub url: Option<String>,
+    pub audience: Vec<String>,
+    pub source: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FeedSnapshot {
+    /// Our successful check time, separate from the source's own ingestion/publication times.
+    pub checked_at: u64,
+    pub fetched_at: u64,
+    pub source_checked_at: u64,
+    pub source_expires_at: u64,
+    pub newest_post_at: Option<u64>,
+    pub stale: bool,
+    pub signal: Option<PublicEvent>,
+    pub posts: Vec<PublicEvent>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ServiceSurface {
+    pub id: String,
+    pub label: String,
+    pub status: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ServiceStatus {
+    pub checked_at: u64,
+    pub status: String,
+    pub description: String,
+    pub stale: bool,
+    pub surfaces: Vec<ServiceSurface>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Snapshot {
@@ -46,6 +95,11 @@ pub struct Snapshot {
     pub refreshing: bool,
     pub cached: bool,
     pub fetched_at: u64,
+    pub checked_at: u64,
+    pub last_attempt_at: u64,
+    pub source_checked_at: u64,
+    pub source_expires_at: u64,
+    pub poll_interval_ms: u64,
     pub updated_at: u64,
     pub backoff_until: u64,
     pub next_check_at: u64,
@@ -53,9 +107,15 @@ pub struct Snapshot {
     pub source_name: String,
     pub source_url: String,
     pub notifications: bool,
+    pub banked_notifications: bool,
     pub last_reset: Option<ConfirmedReset>,
     pub history: Vec<ConfirmedReset>,
     pub forecast: Option<Forecast>,
+    pub events: Vec<PublicEvent>,
+    pub banked: Option<PublicEvent>,
+    pub banked_history: Vec<PublicEvent>,
+    pub feed: Option<FeedSnapshot>,
+    pub service: Option<ServiceStatus>,
 }
 
 impl Default for Snapshot {
@@ -65,6 +125,11 @@ impl Default for Snapshot {
             refreshing: false,
             cached: false,
             fetched_at: 0,
+            checked_at: 0,
+            last_attempt_at: 0,
+            source_checked_at: 0,
+            source_expires_at: 0,
+            poll_interval_ms: POLL_MS,
             updated_at: 0,
             backoff_until: 0,
             next_check_at: 0,
@@ -72,9 +137,15 @@ impl Default for Snapshot {
             source_name: SOURCE_NAME.into(),
             source_url: SOURCE_URL.into(),
             notifications: true,
+            banked_notifications: true,
             last_reset: None,
             history: Vec::new(),
             forecast: None,
+            events: Vec::new(),
+            banked: None,
+            banked_history: Vec::new(),
+            feed: None,
+            service: None,
         }
     }
 }
@@ -89,6 +160,11 @@ pub struct Store {
     initialized: bool,
     high_watermark_at: u64,
     high_watermark_ids: Vec<String>,
+    banked_initialized: bool,
+    banked_high_watermark_at: u64,
+    banked_latest_id: String,
+    banked_seen: Vec<String>,
+    timeline_events: Vec<PublicEvent>,
 }
 
 impl Store {
@@ -125,14 +201,72 @@ impl Store {
         new
     }
 
-    fn view(&self, notifications: bool, now: u64) -> Snapshot {
+    fn view(&self, notifications: bool, banked_notifications: bool, now: u64) -> Snapshot {
         let mut snapshot = self.snapshot.clone();
         snapshot.notifications = notifications;
-        if snapshot.status == "ok" && now.saturating_sub(snapshot.fetched_at) > STALE_MS {
+        snapshot.banked_notifications = banked_notifications;
+        if snapshot.status == "ok"
+            && (now.saturating_sub(snapshot.fetched_at) > STALE_MS
+                || snapshot.source_expires_at > 0 && snapshot.source_expires_at < now)
+        {
             snapshot.status = "stale".into();
             snapshot.cached = true;
         }
+        if let Some(feed) = snapshot.feed.as_mut() {
+            feed.stale |= now.saturating_sub(feed.checked_at) > STALE_MS
+                || feed.source_expires_at > 0 && feed.source_expires_at < now;
+        }
         snapshot
+    }
+
+    fn observe_banked(&mut self, events: &[PublicEvent], now: u64) -> Option<PublicEvent> {
+        let banked: Vec<&PublicEvent> = events
+            .iter()
+            .filter(|e| e.kind == "banked" && !e.preview && e.announced_at <= now)
+            .collect();
+        let latest = banked.first().copied();
+        let key = |event: &PublicEvent| {
+            format!(
+                "{}:{}",
+                event.id,
+                event.banked_state.as_deref().unwrap_or("unknown")
+            )
+        };
+        let alert = if self.banked_initialized {
+            banked
+                .iter()
+                .find(|event| {
+                    !self.banked_seen.contains(&key(event))
+                        && (event.announced_at > self.banked_high_watermark_at
+                            || event.announced_at == self.banked_high_watermark_at
+                                && event.id == self.banked_latest_id
+                                && event
+                                    .banked_state
+                                    .as_deref()
+                                    .is_some_and(|state| state != "unknown"))
+                })
+                .map(|event| (*event).clone())
+        } else {
+            self.banked_initialized = true;
+            self.banked_high_watermark_at = latest.map(|e| e.announced_at).unwrap_or(now);
+            None
+        };
+        if let Some(latest) = latest {
+            if latest.announced_at >= self.banked_high_watermark_at {
+                self.banked_high_watermark_at = latest.announced_at;
+                self.banked_latest_id = latest.id.clone();
+            }
+        }
+        for event in banked.iter().rev() {
+            let key = key(event);
+            if !self.banked_seen.contains(&key) {
+                self.banked_seen.push(key);
+            }
+        }
+        if self.banked_seen.len() > 256 {
+            self.banked_seen.drain(..self.banked_seen.len() - 256);
+        }
+        alert
     }
 }
 
@@ -148,6 +282,10 @@ pub fn load_persisted() -> Store {
     store.snapshot.refreshing = false;
     store.snapshot.source_name = SOURCE_NAME.into();
     store.snapshot.source_url = SOURCE_URL.into();
+    store.snapshot.poll_interval_ms = POLL_MS;
+    if store.snapshot.checked_at == 0 {
+        store.snapshot.checked_at = store.snapshot.fetched_at;
+    }
     if store.snapshot.fetched_at > 0 {
         store.snapshot.status = "stale".into();
         store.snapshot.cached = true;
@@ -197,34 +335,79 @@ fn source_link(value: Option<&Value>) -> Option<String> {
     .then(|| url.chars().take(512).collect())
 }
 
-fn parse_timeline(value: &Value, now: u64) -> Result<(u64, Vec<ConfirmedReset>), String> {
-    // Timeline update metadata is useful but not part of the documented stable event contract.
-    // Publication freshness comes from the response headers; an omitted date stays unknown.
-    let updated_at = timestamp(value.get("updated_at")).unwrap_or(0);
-    let events = value
-        .get("events")
-        .and_then(Value::as_array)
-        .ok_or("Timeline has no events array")?;
-    let mut resets = Vec::new();
-    for event in events.iter().take(2000) {
-        if event.get("group").and_then(Value::as_str) != Some("reset")
-            || event.get("announcement_state").and_then(Value::as_str) != Some("announced")
-            || event
-                .get("preview")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-        {
-            continue;
+fn banked_state(value: Option<&Value>) -> Option<String> {
+    value.filter(|v| !v.is_null()).map(|v| match v.as_str() {
+        Some("announced" | "arriving" | "available") => v.as_str().unwrap().into(),
+        _ => "unknown".into(),
+    })
+}
+
+fn parse_public_event(event: &Value, source: &str, tweet: bool, now: u64) -> Option<PublicEvent> {
+    let announced_at = timestamp(event.get(if tweet { "at" } else { "announced_at" }))?;
+    let preview = event
+        .get("preview")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if announced_at > now && !preview {
+        return None;
+    }
+    let mut id = text(event.get("id"), 128);
+    if id.is_empty() {
+        id = text(event.get("tweet_id"), 128);
+    }
+    if id.is_empty() {
+        return None;
+    }
+    let raw = text(event.get(if tweet { "kind" } else { "group" }), 64);
+    let state = banked_state(event.get("banked_state"));
+    let is_banked = state.is_some()
+        || raw == "banked"
+        || event.get("reset_kind").and_then(Value::as_str) == Some("banked");
+    let kind = if is_banked {
+        "banked"
+    } else {
+        match raw.as_str() {
+            "reset" | "boost" | "unlock" | "credits" | "signal" | "limits" => raw.as_str(),
+            "candidate" => "signal",
+            _ => "other",
         }
-        let Some(announced_at) = timestamp(event.get("announced_at")).filter(|at| *at <= now)
-        else {
-            continue;
-        };
-        let id = text(event.get("id"), 128);
-        if id.is_empty() || resets.iter().any(|e: &ConfirmedReset| e.id == id) {
-            continue;
+    }
+    .to_string();
+    let group = if tweet {
+        if is_banked {
+            "credits".into()
+        } else {
+            raw
         }
-        let audience = event
+    } else {
+        raw
+    };
+    let announcement_state = text(event.get("announcement_state"), 64);
+    let confirmed = source == "timeline"
+        && group == "reset"
+        && kind == "reset"
+        && announcement_state == "announced"
+        && !preview;
+    let mut summary = text(event.get("summary"), 1000);
+    if summary.is_empty() {
+        summary = text(event.get("text"), 1000);
+    }
+    Some(PublicEvent {
+        id,
+        announced_at,
+        kind,
+        group,
+        announcement_state,
+        banked_state: if is_banked {
+            Some(state.unwrap_or_else(|| "unknown".into()))
+        } else {
+            None
+        },
+        confirmed,
+        preview,
+        summary,
+        url: source_link(event.get("url")),
+        audience: event
             .get("audience")
             .and_then(Value::as_array)
             .map(|a| {
@@ -234,21 +417,159 @@ fn parse_timeline(value: &Value, now: u64) -> Result<(u64, Vec<ConfirmedReset>),
                     .map(|s| s.chars().take(64).collect())
                     .collect()
             })
-            .unwrap_or_default();
-        resets.push(ConfirmedReset {
-            id,
-            announced_at,
-            summary: text(event.get("summary"), 1000),
-            url: source_link(event.get("url")),
-            audience,
-        });
-    }
-    resets.sort_by(|a, b| {
+            .unwrap_or_default(),
+        source: source.into(),
+    })
+}
+
+fn sort_events(events: &mut [PublicEvent]) {
+    events.sort_by(|a, b| {
         b.announced_at
             .cmp(&a.announced_at)
             .then_with(|| b.id.cmp(&a.id))
     });
-    Ok((updated_at, resets))
+}
+
+fn parse_public_timeline(value: &Value, now: u64) -> Result<(u64, Vec<PublicEvent>), String> {
+    // Timeline update metadata is useful but not part of the documented stable event contract.
+    // Publication freshness comes from the response headers; an omitted date stays unknown.
+    let updated_at = timestamp(value.get("updated_at")).unwrap_or(0);
+    let events = value
+        .get("events")
+        .and_then(Value::as_array)
+        .ok_or("Timeline has no events array")?;
+    let mut records = Vec::new();
+    for event in events.iter().take(2000) {
+        if let Some(record) = parse_public_event(event, "timeline", false, now) {
+            if !records
+                .iter()
+                .any(|existing: &PublicEvent| existing.id == record.id)
+            {
+                records.push(record);
+            }
+        }
+    }
+    sort_events(&mut records);
+    Ok((updated_at, records))
+}
+
+fn confirmed_resets(events: &[PublicEvent]) -> Vec<ConfirmedReset> {
+    events
+        .iter()
+        .filter(|event| event.confirmed)
+        .map(|event| ConfirmedReset {
+            id: event.id.clone(),
+            announced_at: event.announced_at,
+            summary: event.summary.clone(),
+            url: event.url.clone(),
+            audience: event.audience.clone(),
+        })
+        .collect()
+}
+
+#[cfg(test)]
+fn parse_timeline(value: &Value, now: u64) -> Result<(u64, Vec<ConfirmedReset>), String> {
+    let (updated_at, events) = parse_public_timeline(value, now)?;
+    Ok((updated_at, confirmed_resets(&events)))
+}
+
+fn parse_feed(
+    value: &Value,
+    now: u64,
+    published_at: u64,
+    expires_at: u64,
+) -> Result<FeedSnapshot, String> {
+    let fetched_at =
+        timestamp(value.get("fetched_at")).ok_or("Live feed has no valid fetch time")?;
+    let tweets = value
+        .get("tweets")
+        .and_then(Value::as_array)
+        .ok_or("Live feed has no tweets array")?;
+    let mut posts = Vec::new();
+    for tweet in tweets.iter().take(200) {
+        if let Some(record) = parse_public_event(tweet, "feed", true, now) {
+            if !posts
+                .iter()
+                .any(|event: &PublicEvent| event.id == record.id)
+            {
+                posts.push(record);
+            }
+        }
+    }
+    sort_events(&mut posts);
+    posts.truncate(32);
+    let stale = value.get("stale").and_then(Value::as_bool).unwrap_or(true)
+        || now.saturating_sub(fetched_at) > STALE_MS
+        || fetched_at > now.saturating_add(POLL_MS);
+    Ok(FeedSnapshot {
+        checked_at: now,
+        fetched_at,
+        source_checked_at: published_at,
+        source_expires_at: expires_at,
+        newest_post_at: timestamp(value.get("newest_post_at")),
+        stale,
+        signal: value
+            .get("signal")
+            .and_then(|signal| parse_public_event(signal, "feed", true, now)),
+        posts,
+    })
+}
+
+fn parse_service(value: &Value, now: u64) -> Result<ServiceStatus, String> {
+    let checked_at =
+        timestamp(value.get("checked_at")).ok_or("Service status has no valid check time")?;
+    let current = value
+        .get("current")
+        .and_then(Value::as_object)
+        .ok_or("Service status has no current state")?;
+    Ok(ServiceStatus {
+        checked_at,
+        status: text(current.get("codex"), 80),
+        description: text(current.get("description"), 300),
+        stale: value.get("stale").and_then(Value::as_bool).unwrap_or(true)
+            || now.saturating_sub(checked_at) > STALE_MS
+            || checked_at > now.saturating_add(POLL_MS),
+        surfaces: value
+            .get("surfaces")
+            .and_then(Value::as_array)
+            .map(|surfaces| {
+                surfaces
+                    .iter()
+                    .take(20)
+                    .map(|surface| ServiceSurface {
+                        id: text(surface.get("id"), 80),
+                        label: text(surface.get("label"), 120),
+                        status: text(surface.get("status"), 80),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+    })
+}
+
+fn merge_events(timeline: &[PublicEvent], feed: Option<&FeedSnapshot>) -> Vec<PublicEvent> {
+    let mut events = timeline.to_vec();
+    if let Some(feed) = feed.filter(|feed| !feed.stale) {
+        for post in &feed.posts {
+            if let Some(event) = events.iter_mut().find(|event| event.id == post.id) {
+                // A feed reply can advance the banked lifecycle before the next timeline build.
+                // It can never promote a live classification into a confirmed automatic reset.
+                if post.kind == "banked" && post.banked_state.as_deref() != Some("unknown") {
+                    event.kind = "banked".into();
+                    event.banked_state = post.banked_state.clone();
+                    event.confirmed = false;
+                    event.source = post.source.clone();
+                    if !post.summary.is_empty() {
+                        event.summary = post.summary.clone();
+                    }
+                }
+            } else {
+                events.push(post.clone());
+            }
+        }
+    }
+    sort_events(&mut events);
+    events
 }
 
 fn probability(value: Option<&Value>) -> Option<u8> {
@@ -335,7 +656,14 @@ fn published_time(header: Option<&str>) -> Option<u64> {
         .filter(|at| *at > 0)
 }
 
-fn fetch(url: &str, now: u64) -> Result<Value, FetchError> {
+struct PublishedResponse {
+    value: Value,
+    received_at: u64,
+    checked_at: u64,
+    expires_at: u64,
+}
+
+fn fetch(url: &str, now: u64) -> Result<PublishedResponse, FetchError> {
     let user_agent = format!(
         "Codenotch/{} (+https://github.com/ThePunisherai/codenotch)",
         env!("CARGO_PKG_VERSION")
@@ -370,7 +698,9 @@ fn fetch(url: &str, now: u64) -> Result<Value, FetchError> {
     let published_at = published_time(response.header("x-published-checked-at"));
     let expires_at = published_time(response.header("x-published-expires-at"));
     if expires_at.is_some_and(|at| at < response_at)
-        || published_at.is_some_and(|at| response_at.saturating_sub(at) > STALE_MS)
+        || published_at.is_some_and(|at| {
+            response_at.saturating_sub(at) > STALE_MS || at > response_at.saturating_add(POLL_MS)
+        })
     {
         return Err(FetchError {
             message: "Reset source's published copy is stale; waiting for a fresh update".into(),
@@ -392,9 +722,36 @@ fn fetch(url: &str, now: u64) -> Result<Value, FetchError> {
             backoff_until: 0,
         });
     }
-    serde_json::from_slice(&bytes).map_err(|_| FetchError {
+    let value = serde_json::from_slice(&bytes).map_err(|_| FetchError {
         message: "Reset source returned invalid JSON".into(),
         backoff_until: 0,
+    })?;
+    Ok(PublishedResponse {
+        value,
+        received_at: crate::now_ms(),
+        checked_at: published_at.unwrap_or(0),
+        expires_at: expires_at.unwrap_or(0),
+    })
+}
+
+fn next_poll_at(started_at: u64, backoff_until: u64) -> u64 {
+    started_at.saturating_add(POLL_MS).max(backoff_until)
+}
+
+fn fetch_batch(now: u64) -> [Result<PublishedResponse, FetchError>; 4] {
+    // The documented service exposes published GET copies rather than a subscription stream.
+    // Independent endpoints run together so one slow forecast cannot hold up the reset feed.
+    std::thread::scope(|scope| {
+        let tasks = [TIMELINE_URL, FORECAST_URL, FEED_URL, STATUS_URL]
+            .map(|url| scope.spawn(move || fetch(url, now)));
+        tasks.map(|task| {
+            task.join().unwrap_or_else(|_| {
+                Err(FetchError {
+                    message: "Reset source worker failed".into(),
+                    backoff_until: 0,
+                })
+            })
+        })
     })
 }
 
@@ -416,68 +773,156 @@ fn poll(app: &AppHandle) {
         {
             return;
         }
-        store.snapshot.next_check_at = now.saturating_add(POLL_MS);
+        store.snapshot.last_attempt_at = now;
+        store.snapshot.next_check_at = next_poll_at(now, store.snapshot.backoff_until);
         store.snapshot.refreshing = true;
-        // Record the attempt too: repeatedly restarting must not evade the public API cadence.
+        // Record every endpoint's common attempt start before issuing any requests. Restarts and
+        // manual/focus refreshes share this exact floor, including the service's Retry-After.
         if let Err(error) = persist(&store) {
             crate::applog(&format!("global reset cache: {error}"));
         }
         store.clone()
     };
     broadcast(app);
+    let [timeline, forecast, feed, service] = fetch_batch(now);
     let mut errors = Vec::new();
     let mut new_reset = None;
-    match fetch(TIMELINE_URL, now) {
-        Ok(value) => match parse_timeline(&value, now) {
-            Ok((updated_at, resets)) => {
-                new_reset = store.observe(&resets, now);
+    let mut timeline_fresh = false;
+    let mut feed_fresh = false;
+    match timeline {
+        Ok(response) => match parse_public_timeline(&response.value, response.received_at) {
+            Ok((updated_at, events)) => {
+                let resets = confirmed_resets(&events);
+                new_reset = store.observe(&resets, response.received_at);
                 store.snapshot.updated_at = updated_at;
+                store.snapshot.source_checked_at = response.checked_at;
+                store.snapshot.source_expires_at = response.expires_at;
                 store.snapshot.last_reset = resets.first().cloned();
                 store.snapshot.history = resets.into_iter().take(6).collect();
+                store.timeline_events = events.into_iter().take(256).collect();
+                timeline_fresh = true;
             }
-            Err(error) => errors.push(error),
+            Err(error) => errors.push(format!("Timeline: {error}")),
         },
         Err(error) => {
             store.snapshot.backoff_until = store.snapshot.backoff_until.max(error.backoff_until);
-            errors.push(error.message);
+            errors.push(format!("Timeline: {}", error.message));
         }
     }
-    // A 429 applies to the service: do not send a second request during its backoff.
-    if store.snapshot.backoff_until <= now {
-        match fetch(FORECAST_URL, now) {
-            Ok(value) => match parse_forecast(&value) {
-                Ok(forecast) => store.snapshot.forecast = Some(forecast),
-                Err(error) => errors.push(error),
-            },
-            Err(error) => {
-                store.snapshot.backoff_until =
-                    store.snapshot.backoff_until.max(error.backoff_until);
-                errors.push(error.message);
+    match forecast {
+        Ok(response) => match parse_forecast(&response.value) {
+            Ok(forecast) => store.snapshot.forecast = Some(forecast),
+            Err(error) => errors.push(format!("Forecast: {error}")),
+        },
+        Err(error) => {
+            store.snapshot.backoff_until = store.snapshot.backoff_until.max(error.backoff_until);
+            errors.push(format!("Forecast: {}", error.message));
+        }
+    }
+    match feed {
+        Ok(response) => match parse_feed(
+            &response.value,
+            response.received_at,
+            response.checked_at,
+            response.expires_at,
+        ) {
+            Ok(feed) => {
+                feed_fresh = !feed.stale;
+                if feed.stale {
+                    errors.push("Live feed source is stale".into());
+                }
+                store.snapshot.feed = Some(feed);
             }
+            Err(error) => {
+                if let Some(feed) = store.snapshot.feed.as_mut() {
+                    feed.stale = true;
+                }
+                errors.push(format!("Live feed: {error}"));
+            }
+        },
+        Err(error) => {
+            if let Some(feed) = store.snapshot.feed.as_mut() {
+                feed.stale = true;
+            }
+            store.snapshot.backoff_until = store.snapshot.backoff_until.max(error.backoff_until);
+            errors.push(format!("Live feed: {}", error.message));
         }
     }
+    match service {
+        Ok(response) => match parse_service(&response.value, response.received_at) {
+            Ok(service) => {
+                if service.stale {
+                    errors.push("Service status source is stale".into());
+                }
+                store.snapshot.service = Some(service);
+            }
+            Err(error) => {
+                if let Some(service) = store.snapshot.service.as_mut() {
+                    service.stale = true;
+                }
+                errors.push(format!("Service: {error}"));
+            }
+        },
+        Err(error) => {
+            if let Some(service) = store.snapshot.service.as_mut() {
+                service.stale = true;
+            }
+            store.snapshot.backoff_until = store.snapshot.backoff_until.max(error.backoff_until);
+            errors.push(format!("Service: {}", error.message));
+        }
+    }
+    let events = merge_events(&store.timeline_events, store.snapshot.feed.as_ref());
+    let alert_events = merge_events(
+        if timeline_fresh {
+            &store.timeline_events
+        } else {
+            &[]
+        },
+        if feed_fresh {
+            store.snapshot.feed.as_ref()
+        } else {
+            None
+        },
+    );
+    let new_banked = if timeline_fresh || feed_fresh {
+        store.observe_banked(&alert_events, crate::now_ms())
+    } else {
+        None
+    };
+    store.snapshot.banked = events.iter().find(|event| event.kind == "banked").cloned();
+    store.snapshot.banked_history = events
+        .iter()
+        .filter(|event| event.kind == "banked")
+        .take(8)
+        .cloned()
+        .collect();
+    store.snapshot.events = events.into_iter().take(32).collect();
     store.snapshot.refreshing = false;
-    store.snapshot.next_check_at = crate::now_ms()
-        .saturating_add(POLL_MS)
-        .max(store.snapshot.backoff_until);
+    store.snapshot.checked_at = crate::now_ms();
+    // A 12-second network round trip does not add another 12 seconds to the one-minute cadence.
+    // Requests started in parallel before a 429 may finish, but no future cycle bypasses its floor.
+    store.snapshot.next_check_at = next_poll_at(now, store.snapshot.backoff_until);
     if errors.is_empty() {
         store.snapshot.status = "ok".into();
         store.snapshot.cached = false;
-        store.snapshot.fetched_at = crate::now_ms();
+        store.snapshot.fetched_at = store.snapshot.checked_at;
         store.snapshot.backoff_until = 0;
         store.snapshot.error.clear();
     } else {
-        store.snapshot.status =
-            if store.snapshot.last_reset.is_some() || store.snapshot.forecast.is_some() {
-                "stale"
-            } else {
-                "offline"
-            }
-            .into();
+        store.snapshot.status = if store.snapshot.last_reset.is_some()
+            || store.snapshot.forecast.is_some()
+            || store.snapshot.feed.is_some()
+            || !store.snapshot.events.is_empty()
+        {
+            "stale"
+        } else {
+            "offline"
+        }
+        .into();
         store.snapshot.cached = true;
         store.snapshot.error = errors.join(" · ");
     }
-    // Persist before presenting so a crash/restart cannot replay a delivered announcement.
+    // Persist before presenting either card so a crash/restart cannot replay delivered updates.
     let persisted = match persist(&store) {
         Ok(()) => true,
         Err(error) => {
@@ -492,6 +937,9 @@ fn poll(app: &AppHandle) {
     if persisted {
         if let Some(event) = new_reset {
             crate::reset_alert::enqueue_global(app, event);
+        }
+        if let Some(event) = new_banked {
+            crate::reset_alert::enqueue_banked(app, event);
         }
     }
 }
@@ -509,12 +957,18 @@ pub fn start(app: AppHandle) {
 #[tauri::command]
 pub fn get_global_reset_state(app: AppHandle) -> Snapshot {
     let state = app.state::<AppState>();
-    let notifications = state.cfg.lock().unwrap().global_reset_notifications;
-    let snapshot = state
-        .global_resets
-        .lock()
-        .unwrap()
-        .view(notifications, crate::now_ms());
+    let (notifications, banked_notifications) = {
+        let cfg = state.cfg.lock().unwrap();
+        (
+            cfg.global_reset_notifications,
+            cfg.banked_reset_notifications,
+        )
+    };
+    let snapshot = state.global_resets.lock().unwrap().view(
+        notifications,
+        banked_notifications,
+        crate::now_ms(),
+    );
     snapshot
 }
 
@@ -545,6 +999,26 @@ pub fn set_global_reset_notifications(app: AppHandle, on: bool) -> bool {
 #[tauri::command]
 pub fn preview_global_reset_alert(app: AppHandle) -> Result<(), String> {
     crate::reset_alert::preview_global(app)
+}
+
+#[tauri::command]
+pub fn set_banked_reset_notifications(app: AppHandle, on: bool) -> bool {
+    {
+        let state = app.state::<AppState>();
+        let mut cfg = state.cfg.lock().unwrap();
+        cfg.banked_reset_notifications = on;
+        crate::config::save(&cfg);
+    }
+    if !on {
+        crate::reset_alert::disable_banked(&app);
+    }
+    broadcast(&app);
+    on
+}
+
+#[tauri::command]
+pub fn preview_banked_reset_alert(app: AppHandle) -> Result<(), String> {
+    crate::reset_alert::preview_banked(app)
 }
 
 #[tauri::command]
@@ -680,10 +1154,179 @@ mod tests {
         store.snapshot.status = "ok".into();
         store.snapshot.fetched_at = 100;
         store.snapshot.last_reset = Some(reset("old", 50));
-        let snapshot = store.view(false, 100 + STALE_MS + 1);
+        let snapshot = store.view(false, false, 100 + STALE_MS + 1);
         assert_eq!(snapshot.status, "stale");
         assert!(snapshot.cached);
         assert!(!snapshot.notifications);
         assert_eq!(snapshot.last_reset.unwrap().id, "old");
+    }
+
+    fn banked(id: &str, at: u64, state: &str) -> PublicEvent {
+        PublicEvent {
+            id: id.into(),
+            announced_at: at,
+            kind: "banked".into(),
+            group: "credits".into(),
+            announcement_state: "none".into(),
+            banked_state: Some(state.into()),
+            confirmed: false,
+            preview: false,
+            summary: "Public banked update".into(),
+            url: None,
+            audience: Vec::new(),
+            source: "timeline".into(),
+        }
+    }
+
+    #[test]
+    fn public_timeline_retains_banked_pending_boost_unlock_and_planned_without_resetting_clock() {
+        let value = json!({"events":[
+            {"id":"reset","group":"reset","announced_at":"2026-10-07T03:35:09Z","announcement_state":"announced"},
+            {"id":"banked","group":"credits","announced_at":"2026-10-07T03:36:09Z","banked_state":"available"},
+            {"id":"pending","group":"reset","announced_at":"2026-10-07T03:37:09Z","announcement_state":"none"},
+            {"id":"boost","group":"boost","announced_at":"2026-10-07T03:38:09Z"},
+            {"id":"unlock","group":"unlock","announced_at":"2026-10-07T03:39:09Z"},
+            {"id":"planned","group":"reset","announced_at":"2099-01-01T00:00:00Z","announcement_state":"announced","preview":true}
+        ]});
+        let (_, events) = parse_public_timeline(&value, NOW).unwrap();
+        assert_eq!(events.len(), 6);
+        assert_eq!(
+            events.iter().find(|e| e.id == "banked").unwrap().kind,
+            "banked"
+        );
+        assert!(events.iter().find(|e| e.id == "planned").unwrap().preview);
+        let resets = confirmed_resets(&events);
+        assert_eq!(resets.len(), 1);
+        assert_eq!(resets[0].id, "reset");
+    }
+
+    fn live_feed(stale: bool) -> FeedSnapshot {
+        parse_feed(&json!({"fetched_at":"2026-10-07T19:06:40Z","stale":stale,
+            "newest_post_at":"2026-10-07T19:05:00Z",
+            "signal":{"tweet_id":"candidate","kind":"candidate","at":"2026-10-07T19:03:00Z","summary":"Related reset signal"},
+            "tweets":[
+                {"id":"banked-reply","kind":"other","banked_state":"arriving","at":"2026-10-07T19:05:00Z","text":"Will be there later"},
+                {"id":"candidate","kind":"candidate","at":"2026-10-07T19:03:00Z","text":"Full reset coming"}
+            ]
+        }), NOW, NOW - 1000, NOW + POLL_MS).unwrap()
+    }
+
+    #[test]
+    fn feed_reply_advances_public_banked_lifecycle_but_candidate_never_confirms_a_reset() {
+        let feed = live_feed(false);
+        assert!(!feed.stale);
+        assert_eq!(feed.posts[0].kind, "banked");
+        assert_eq!(feed.posts[0].banked_state.as_deref(), Some("arriving"));
+        assert!(!feed.posts[1].confirmed);
+        assert_eq!(feed.signal.unwrap().kind, "signal");
+        assert!(parse_feed(&json!({"fetched_at":"2026-10-07T19:06:40Z"}), NOW, 0, 0).is_err());
+    }
+
+    #[test]
+    fn banked_cursor_baselines_lifecycle_transitions_and_restart_without_touching_reset_cursor() {
+        let mut store = Store::default();
+        let announced = banked("grant", 100, "announced");
+        let arriving = banked("grant", 100, "arriving");
+        let available = banked("grant", 100, "available");
+        assert!(store.observe_banked(&[announced], NOW).is_none());
+        assert_eq!(
+            store.observe_banked(&[arriving.clone()], NOW),
+            Some(arriving)
+        );
+        assert_eq!(
+            store.observe_banked(&[available.clone()], NOW),
+            Some(available.clone())
+        );
+        let saved = serde_json::to_string(&store).unwrap();
+        let mut restarted: Store = serde_json::from_str(&saved).unwrap();
+        assert!(restarted.observe_banked(&[available], NOW).is_none());
+        assert!(restarted
+            .observe_banked(&[banked("grant", 100, "unknown")], NOW)
+            .is_none());
+        assert!(restarted
+            .observe_banked(&[banked("grant", 100, "available")], NOW)
+            .is_none());
+        assert!(restarted
+            .observe_banked(&[banked("new-grant", 200, "unknown")], NOW)
+            .is_some());
+        assert!(!store.initialized);
+        assert_eq!(store.high_watermark_at, 0);
+    }
+
+    #[test]
+    fn stale_live_posts_cannot_promote_banked_status_or_trigger_cards() {
+        let timeline = vec![banked("old", 100, "unknown")];
+        let stale = live_feed(true);
+        let events = merge_events(&timeline, Some(&stale));
+        assert_eq!(events, timeline);
+        let mut store = Store::default();
+        assert!(store.observe_banked(&events, NOW).is_none());
+        assert!(store.observe_banked(&events, NOW).is_none());
+        let fresh = live_feed(false);
+        let events = merge_events(&timeline, Some(&fresh));
+        assert_eq!(
+            store
+                .observe_banked(&events, NOW)
+                .unwrap()
+                .banked_state
+                .as_deref(),
+            Some("arriving")
+        );
+    }
+
+    #[test]
+    fn banked_corrections_planned_future_and_old_history_stay_quiet() {
+        let mut store = Store::default();
+        assert!(store.observe_banked(&[], NOW).is_none());
+        assert!(store
+            .observe_banked(&[banked("old", 100, "available")], NOW)
+            .is_none());
+        let mut planned = banked("future", NOW + POLL_MS, "available");
+        planned.preview = true;
+        assert!(store.observe_banked(&[planned], NOW).is_none());
+        assert!(store
+            .observe_banked(&[banked("new", NOW + 1, "unknown")], NOW + 1)
+            .is_some());
+        assert!(store
+            .observe_banked(&[banked("re-id", NOW + 1, "available")], NOW + 2)
+            .is_none());
+    }
+
+    #[test]
+    fn service_ingestion_and_publication_expiry_remain_honest() {
+        let mut feed = live_feed(false);
+        feed.fetched_at = NOW - STALE_MS - 1;
+        let stale = parse_feed(
+            &json!({"fetched_at":"2026-10-07T18:00:00Z","stale":false,"tweets":[]}),
+            NOW,
+            0,
+            0,
+        )
+        .unwrap();
+        assert!(stale.stale);
+        let future = parse_feed(
+            &json!({"fetched_at":"2099-01-01T00:00:00Z","stale":false,"tweets":[]}),
+            NOW,
+            0,
+            0,
+        )
+        .unwrap();
+        assert!(future.stale);
+        let service = parse_service(&json!({"checked_at":"2026-10-07T19:06:40Z","stale":false,"current":{"codex":"future_status","description":"Source description"},"surfaces":[{"id":"cli","label":"Codex CLI","status":"maintenance"}]}), NOW).unwrap();
+        assert_eq!(service.status, "future_status");
+        assert_eq!(service.surfaces[0].status, "maintenance");
+        assert!(!service.stale);
+        let mut store = Store::default();
+        store.snapshot.status = "ok".into();
+        store.snapshot.fetched_at = NOW;
+        store.snapshot.source_expires_at = NOW - 1;
+        assert_eq!(store.view(true, true, NOW).status, "stale");
+    }
+
+    #[test]
+    fn polling_floor_is_start_to_start_and_retry_after_can_raise_it() {
+        assert_eq!(next_poll_at(NOW, 0), NOW + POLL_MS);
+        assert_eq!(next_poll_at(NOW, NOW + 3600_000), NOW + 3600_000);
+        assert_eq!(next_poll_at(NOW, NOW - 1), NOW + POLL_MS);
     }
 }

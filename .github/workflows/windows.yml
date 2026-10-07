@@ -78,6 +78,9 @@ jobs:
       - name: Test Codex reset tracker
         run: node --test test-reset-tracker.cjs
 
+      - name: Test account profiles and selected account cards
+        run: node --test test-account-profiles.cjs test-notch-accounts.cjs
+
       # Reported rather than enforced: the crate already carries warnings, and
       # failing on them would hold every change hostage to that cleanup.
       - name: Clippy

@@ -14,10 +14,10 @@ documented behaviour and the wire formats.
 | Cell | Source | How it reads it |
 |---|---|---|
 | **Claude** | `GET https://api.anthropic.com/api/oauth/usage` with the token Claude Code keeps in `~/.claude/.credentials.json` | Session / weekly windows, 429 back-off with a persisted deadline, stale readings dimmed with their age. Renews that token by running the standalone `claude -p` shortly before it expires (Claude Code inside the desktop app never writes this file), and never sends an expired one. A thin arc spins inside the ring while a Claude session is working, and pulses amber when one is waiting on you (Claude Code hooks + transcript watcher, desktop app included). |
-| **Codex** | The local Codex sign-in in `~/.codex/auth.json` (read only, never refreshed), falling back to the newest session snapshot | Live primary/secondary windows (5h + weekly on paid plans, a monthly window on free) while Codex is signed in; Spark and Code review appear on the hover card when Codex reports them; otherwise the last snapshot, marked stale by its own timestamp. |
-| **Cursor** | The editor's own session from `state.vscdb` → `cursor.com/api/usage-summary` | Included usage / API usage / on-demand, reset at billing-cycle end. Nothing to sign into: it borrows the editor's session, so there is only ever one account. |
+| **Codex** | The selected isolated profile, or the existing local Codex sign-in when no profile is selected; native app-server recovery and session snapshot fallback | Live primary/secondary windows (5h + weekly on paid plans, a monthly window on free); Spark and Code review when reported. Official Codex handles login and credential renewal. |
+| **Cursor** | The selected protected session import, or the editor's own `state.vscdb` session → `cursor.com/api/usage-summary` | Included usage / API usage / on-demand, reset at billing-cycle end. Detect and retain separate editor sessions in Settings → Accounts. |
 | **Grok** | The Grok CLI's own session in `~/.grok/auth.json` (read only, never refreshed) → `cli-chat-proxy.grok.com/v1/billing?format=credits`, the endpoint that CLI's own `/usage` asks | The weekly Grok Build allowance, with the account on the hover card. Only a session minted by `auth.x.ai` is used — the file can also hold a customer IdP token meant for that customer's private proxy. A fresh weekly period reads 0 %, not "unmetered". |
-| **GitHub Copilot** | The GitHub CLI's own session, read only: `GH_TOKEN`/`GITHUB_TOKEN` when set, else `oauth_token` in `%APPDATA%\GitHub CLI\hosts.yml`, else `gh auth token` run hidden (the token may live in Credential Manager) → `api.github.com/copilot_internal/user`, the quota endpoint GitHub's own editors ask | Premium requests on the ring, with chat requests and completions on the hover card; all reset on the first of the month. An `unlimited` quota, or one with no entitlement, draws nothing. The account and plan are named on the card. Sign in with `gh auth login`; Codenotch never starts a sign-in itself. |
+| **GitHub Copilot** | Selected protected token or isolated GitHub CLI session; otherwise existing `GH_TOKEN`/`GITHUB_TOKEN` or GitHub CLI session → `api.github.com/copilot_internal/user` | Premium requests, chat requests and completions; reset on the first of the month. Settings can launch the official GitHub CLI device login for a profile. |
 | **OpenCode** | OpenCode's own sign-in, read only: the `opencode-go` key in `~/.local/share/opencode/auth.json` → `opencode.ai/zen/go/v1/usage`, or — since OpenCode 1.18 — the OAuth sign-in in `opencode.db` (`credential` table) → `opencode.ai/inference/go/v1/usage` | The Go plan's 5-hour, weekly and monthly windows. A sign-in without a Go plan shows "No OpenCode Go subscription" instead of a ring; Zen pay-as-you-go credit has no balance or usage API, so it is not shown. |
 | **Antigravity** | Official `agy` CLI `/usage` print when installed; otherwise the existing local `language_server` bridge, Google Cloud Code API, or transcript model count | Official four quota rows (Gemini & Claude/GPT 5h/weekly) without running the full IDE. When CLI is absent, falls back to legacy local bridge/API. |
 | **OpenCode Go** | `GET https://opencode.ai/zen/go/v1/usage` | Reads the `opencode-go` key in OpenCode's `auth.json`, or `OPENCODE_APIKEY` when set. The environment key takes precedence. Shows rolling 5-hour, weekly and monthly usage. This is a separate subscription from the Z.ai GLM Coding Plan; its key must not be sent to Z.ai's monitor endpoint. |
@@ -33,7 +33,8 @@ app-server method before falling back to a rollout snapshot. The desktop's
 `%LOCALAPPDATA%\OpenAI\Codex\bin` installation is checked as well as native CLI
 candidates. No `.cmd`/Node wrapper is launched. The owned process is hidden,
 limited to 20 seconds, and terminated/reaped after the read; no inference or
-login command is sent. Existing HTTP 429 backoff and five-minute polling remain.
+login command is sent. Existing HTTP 429 backoff remains. Codex and Claude poll
+every minute and request a fresh reading at a reported reset deadline.
 
 The main ring/tray selects only core `primary`, never a weekly, Spark or
 code-review replacement. If `primary` is absent the headline stays blank;
@@ -66,7 +67,7 @@ it prints no account credentials or quota values and is not run by CI.
 ### Reset cards
 
 The Windows app can show a short card when any active provider — Claude,
-Codex, Cursor, GLM, OpenCode, Grok, Antigravity — renews a quota window it was
+Codex, Cursor, GLM, OpenCode, Grok, Copilot, Antigravity — renews a quota window it was
 using. Each provider's own windows are watched independently and by their own
 id, not by a fixed duration, so this needs no per-provider list to stay
 current. Each window needs at least 10% usage before its reset counts, and a
@@ -88,18 +89,37 @@ other. The Windows app must be running to observe and show a reset.
 ### Codex / ChatGPT Work Reset Tracker (this fork)
 
 Open **Settings → Reset Tracker** for the latest confirmed global reset, recent
-verified reset history, historical 24/48-hour forecast, and the personal quota
-windows returned by your installed Codex client. Public reset data is provided by
+verified reset history, banked-reset lifecycle, live feed, service status, historical 24/48-hour forecast, and the personal quota
+windows returned by your selected Codex account. Public reset data is provided by
 [codex-reset.com](https://codex-reset.com/), independently of your OpenAI account.
 Forecasts and announced future resets are not completed resets, and banked grants
 are not treated as completed resets. Ordinary ChatGPT chat limits are separate;
 this tracker does not claim to verify them.
+
+Public endpoints are checked concurrently every minute, respecting the source's
+60-second cache and one-request-per-minute limit. Ages and next-check countdowns
+tick each second. Opening the tracker or returning to the window requests the
+earliest permitted check; it cannot promise zero source publication delay.
+Banked availability is a public announcement, not a personal grant balance.
 
 Enable global reset cards in the tracker and choose **Test notification** to see
 one immediately. The first successful check establishes a quiet baseline. Later
 confirmed global resets notify once; the cursor is saved across restarts. Personal
 quota cards still depend on a fresh local reading. The app must stay running
 (including in the tray) to poll and display notifications.
+
+### Multiple accounts
+
+Settings has an account manager for every provider: add a named profile, detect
+supported existing sessions, connect it, and choose which account to use. Codex
+and Claude launch their official native CLI login with isolated profile roots.
+Other providers offer their supported CLI, session import or key method. A saved
+credential becomes Connected after a fresh successful usage reading. Selected
+profiles use separate caches and rate-limit waits, and never borrow another
+profile's credentials. Switching clears the displayed quota and its personal
+reset baseline before refreshing. Imported credentials and entered keys use
+current-user Windows DPAPI; CLI-managed auth files stay in the profile directory.
+See [the account and tracker guide](../WINDOWS_RESET_TRACKER.md) for provider methods.
 
 For this fork, download the Windows installer or portable ZIP from the latest
 successful [Windows Package run](https://github.com/ThePunisherai/codenotch/actions).
@@ -114,8 +134,8 @@ See [the reset tracker guide](../WINDOWS_RESET_TRACKER.md) for all controls.
 ### Claude sign-in
 
 When Claude is signed out, its card offers **Sign in**, which opens the standalone
-Claude Code CLI's browser login (`claude auth login --claudeai`). It is offered on
-the default `~/.claude` account only, since that is the one the CLI signs in.
+Claude Code CLI's browser login (`claude auth login --claudeai`). Account profiles
+set `CLAUDE_CONFIG_DIR` for that process so each login stays isolated.
 Finish in the browser; if it
 displays a code, paste it in the opened terminal, not in Codenotch. The card
 refreshes after the CLI exits without restarting the widget. The native CLI must
@@ -138,7 +158,7 @@ that a still-valid login has expired. Existing automatic renewal is unchanged.
 
 Restart Codenotch after installing or removing `agy`: the source is selected at startup.
 The CLI's text report is parsed defensively; an unsupported format or failed sign-in
-shows an error or the last reading marked stale. Codenotch does not automate sign-in.
+shows an error or the last reading marked stale. Profile connection uses the supported official CLI or explicit import.
 
 ## Install / build
 

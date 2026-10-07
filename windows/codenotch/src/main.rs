@@ -1,5 +1,7 @@
 #![cfg_attr(all(not(debug_assertions), windows), windows_subsystem = "windows")]
 
+mod accounts;
+mod profile_auth;
 mod autostart;
 mod backdrop;
 mod config;
@@ -42,7 +44,7 @@ use tauri::{AppHandle, Emitter, Manager};
 /// and its tail on the left. `fitZoom` in ui/notch.html divides by the same width.
 pub const NOTCH_W: f64 = 360.0;
 /// Hand-bumped build tag, written to run.log at startup so a log can always be matched to the exe that wrote it.
-pub const BUILD: &str = "r34-reset-tracker";
+pub const BUILD: &str = "r35-multiaccount-live";
 /// The notch window's long side: the upright window's height, and both sides of the flat one.
 ///
 /// Five cells make a 447 px pill; its fillets add 38.7 px at each end and the settings orb reaches
@@ -484,10 +486,42 @@ fn get_usage(state: tauri::State<AppState>) -> usage::UsageSnapshot {
 }
 
 #[tauri::command]
-fn claude_sign_in() -> Result<(), String> { claude_auth::start_login() }
+fn claude_sign_in(app: AppHandle) -> Result<(), String> {
+    if let Some(profile) = accounts::active("claude") {
+        profile_auth::provider_sign_in(app, "claude".into(), profile.id)
+    } else {
+        claude_auth::start_login()
+    }
+}
 
 #[tauri::command]
 fn get_claude_auth() -> claude_auth::AuthState { claude_auth::state() }
+
+/// A profile transition invalidates the displayed quota before the replacement poll begins.
+/// Called while accounts' transition gate is held; no account-registry calls may be made here.
+pub(crate) fn accounts_changed(app: &AppHandle, provider: &str) {
+    let state = app.state::<AppState>();
+    let pending = usage::UsageSnapshot {
+        status: "loading".into(),
+        note: "Refreshing the selected account".into(),
+        ..Default::default()
+    };
+    let (snapshot, event) = match provider {
+        "claude" => (&state.usage, "usage"),
+        "codex" => (&state.codex, "codex"),
+        "cursor" => (&state.cursor, "cursor"),
+        "grok" => (&state.grok, "grok"),
+        "copilot" => (&state.copilot, "copilot"),
+        "gemini" | "antigravity" => (&state.antigravity, "antigravity"),
+        "glm" => (&state.glm, "glm"),
+        "opencode" => (&state.opencode, "opencode"),
+        _ => return,
+    };
+    *snapshot.lock().unwrap() = pending.clone();
+    reset_alert::account_changed(app, provider);
+    let _ = app.emit(event, &pending);
+    refresh_provider(app, provider);
+}
 
 /// Asks one provider to read again, and says whether a reading is on its way. Claude's rate-limit
 /// wait stands, as on the Mac: asking early spends a request and can double the wait.
@@ -503,7 +537,7 @@ pub(crate) fn refresh_provider(app: &AppHandle, provider: &str) -> bool {
         "cursor" => cursor::request_refresh(),
         "grok" => grok::request_refresh(),
         "copilot" => copilot::request_refresh(),
-        "gemini" => antigravity::request_refresh(),
+        "gemini" | "antigravity" => antigravity::request_refresh(),
         "glm" => glm::request_refresh(),
         "opencode" => opencode::request_refresh(),
         _ => return false,
@@ -603,7 +637,7 @@ pub(crate) fn provider_page(provider: &str) -> Option<(&'static str, &'static st
         "cursor" => ("https://cursor.com/dashboard", "cursor.com"),
         "grok" => ("https://grok.com/?_s=usage", "grok.com"),
         "copilot" => ("https://github.com/settings/copilot", "github.com"),
-        "gemini" => ("https://antigravity.google", "antigravity.google"),
+        "gemini" | "antigravity" => ("https://antigravity.google", "antigravity.google"),
         "glm" => ("https://z.ai/manage-apikey/apikey-list", "z.ai"),
         "opencode" => ("https://opencode.ai", "opencode.ai"),
         _ => return None,
@@ -1623,7 +1657,7 @@ pub fn provider_label(id: &str) -> &'static str {
         "cursor" => "Cursor",
         "grok" => "Grok",
         "copilot" => "GitHub Copilot",
-        "gemini" => "Antigravity",
+        "gemini" | "antigravity" => "Antigravity",
         "glm" => "z.ai",
         "opencode" => "OpenCode",
         _ => "Claude",
@@ -1832,6 +1866,13 @@ fn main() {
             get_usage,
             claude_sign_in,
             get_claude_auth,
+            accounts::list_provider_accounts,
+            accounts::add_provider_account,
+            accounts::select_provider_account,
+            accounts::remove_provider_account,
+            accounts::detect_provider_accounts,
+            accounts::connect_provider_account,
+            profile_auth::provider_sign_in,
             updater::get_update_state,
             updater::check_for_update,
             updater::install_update,
@@ -1847,6 +1888,8 @@ fn main() {
             global_reset::refresh_global_resets,
             global_reset::set_global_reset_notifications,
             global_reset::preview_global_reset_alert,
+            global_reset::set_banked_reset_notifications,
+            global_reset::preview_banked_reset_alert,
             global_reset::open_global_reset_source,
             get_cursor,
             get_grok,

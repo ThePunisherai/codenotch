@@ -47,11 +47,14 @@ pub fn request_refresh() {
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn store_path() -> PathBuf {
-    crate::config::config_path().with_file_name("copilot.json")
+    crate::accounts::cache_path("copilot", "copilot.json")
 }
 
 pub fn load_persisted() -> UsageSnapshot {
@@ -67,12 +70,6 @@ pub fn load_persisted() -> UsageSnapshot {
         .unwrap_or_default()
 }
 
-fn persist(s: &UsageSnapshot) {
-    if let Ok(t) = serde_json::to_string_pretty(s) {
-        let _ = std::fs::write(store_path(), t);
-    }
-}
-
 // ---------------- Locating GitHub CLI ----------------
 
 fn non_empty(v: Option<String>) -> Option<String> {
@@ -80,13 +77,24 @@ fn non_empty(v: Option<String>) -> Option<String> {
 }
 
 fn env_token() -> Option<String> {
-    non_empty(std::env::var("GH_TOKEN").ok()).or_else(|| non_empty(std::env::var("GITHUB_TOKEN").ok()))
+    if crate::accounts::active("copilot").is_some() {
+        return None;
+    }
+    non_empty(std::env::var("GH_TOKEN").ok())
+        .or_else(|| non_empty(std::env::var("GITHUB_TOKEN").ok()))
 }
 
 /// Where `gh` keeps `hosts.yml`, in the order `gh` itself looks: an explicit `GH_CONFIG_DIR`, an
 /// XDG home, then Roaming AppData on Windows, and `~/.config/gh` as the Unix default (a WSL or
 /// Git-Bash habit that carries over).
 fn config_dirs() -> Vec<PathBuf> {
+    if let Some(profile) = crate::accounts::active("copilot") {
+        return vec![profile.root];
+    }
+    external_config_dirs()
+}
+
+fn external_config_dirs() -> Vec<PathBuf> {
     let mut v = Vec::new();
     if let Some(d) = non_empty(std::env::var("GH_CONFIG_DIR").ok()) {
         v.push(PathBuf::from(d));
@@ -106,7 +114,10 @@ fn config_dirs() -> Vec<PathBuf> {
 /// The first `hosts.yml` that exists, or where the first candidate would be (for doctor)
 pub fn hosts_path() -> Option<PathBuf> {
     let dirs = config_dirs();
-    dirs.iter().map(|d| d.join("hosts.yml")).find(|p| p.is_file()).or_else(|| dirs.first().map(|d| d.join("hosts.yml")))
+    dirs.iter()
+        .map(|d| d.join("hosts.yml"))
+        .find(|p| p.is_file())
+        .or_else(|| dirs.first().map(|d| d.join("hosts.yml")))
 }
 
 /// Candidates in order: the MSI's Program Files install, the per-user installers, winget's
@@ -120,7 +131,13 @@ pub fn find_executable() -> Option<PathBuf> {
     }
     if let Some(local) = dirs::data_local_dir() {
         cands.push(local.join("Programs").join("GitHub CLI").join("gh.exe"));
-        cands.push(local.join("Microsoft").join("WinGet").join("Links").join("gh.exe"));
+        cands.push(
+            local
+                .join("Microsoft")
+                .join("WinGet")
+                .join("Links")
+                .join("gh.exe"),
+        );
     }
     if let Some(h) = dirs::home_dir() {
         cands.push(h.join("scoop").join("shims").join("gh.exe"));
@@ -136,12 +153,24 @@ pub fn find_executable() -> Option<PathBuf> {
 /// Something on this machine can hand over a GitHub session: a token in the environment, a
 /// GitHub CLI config, or the CLI itself. Otherwise the provider stays off the notch.
 pub fn present() -> bool {
-    env_token().is_some() || hosts_path().map(|p| p.is_file()).unwrap_or(false) || find_executable().is_some()
+    crate::accounts::active("copilot").is_some()
+        || env_token().is_some()
+        || hosts_path().map(|p| p.is_file()).unwrap_or(false)
+        || find_executable().is_some()
 }
 
 /// `gh auth token --hostname github.com`, hidden, bounded by `GH_TIMEOUT`. The CLI reads the token
 /// back out of Credential Manager; nothing here can make it sign in.
 fn gh_token() -> Option<String> {
+    // gh's system keyring is shared across config directories. Only an
+    // explicitly captured token may authenticate a selected profile.
+    if crate::accounts::active("copilot").is_some() {
+        return None;
+    }
+    external_gh_token()
+}
+
+fn external_gh_token() -> Option<String> {
     use std::process::{Command, Stdio};
     let exe = find_executable()?;
     let mut cmd = Command::new(&exe);
@@ -176,7 +205,11 @@ fn gh_token() -> Option<String> {
         }
     };
     let out = reader.join().ok()?;
-    if ok { non_empty(Some(out)) } else { None }
+    if ok {
+        non_empty(Some(out))
+    } else {
+        None
+    }
 }
 
 // ---------------- Credentials (borrowed, never written) ----------------
@@ -193,7 +226,11 @@ pub struct Creds {
 fn yaml_value<'a>(line: &'a str, key: &str) -> Option<&'a str> {
     let rest = line.strip_prefix(key)?.strip_prefix(':')?;
     let v = rest.trim().trim_matches(|c: char| c == '"' || c == '\'');
-    if v.is_empty() { None } else { Some(v) }
+    if v.is_empty() {
+        None
+    } else {
+        Some(v)
+    }
 }
 
 /// `user` and `oauth_token` under the `github.com:` block. Every indented line of that block is
@@ -201,7 +238,9 @@ fn yaml_value<'a>(line: &'a str, key: &str) -> Option<&'a str> {
 /// after it is skipped whole.
 pub fn parse_hosts(text: &str) -> (Option<String>, Option<String>) {
     let mut lines = text.lines();
-    let Some(_) = lines.find(|l| l.trim() == "github.com:") else { return (None, None) };
+    let Some(_) = lines.find(|l| l.trim() == "github.com:") else {
+        return (None, None);
+    };
     let mut user = None;
     let mut token = None;
     for line in lines {
@@ -220,24 +259,75 @@ pub fn parse_hosts(text: &str) -> (Option<String>, Option<String>) {
 }
 
 /// Injectable inputs keep the order testable without a real token or a running CLI.
-pub fn pick(env: Option<String>, hosts: Option<&str>, command: impl FnOnce() -> Option<String>) -> Option<Creds> {
+pub fn pick(
+    env: Option<String>,
+    hosts: Option<&str>,
+    command: impl FnOnce() -> Option<String>,
+) -> Option<Creds> {
     let (username, file_token) = hosts.map(parse_hosts).unwrap_or((None, None));
     if let Some(token) = env {
-        return Some(Creds { token, username, source: "GitHub" });
+        // Environment credentials need not belong to the hosts.yml user.
+        return Some(Creds {
+            token,
+            username: None,
+            source: "GitHub",
+        });
     }
     if let Some(token) = file_token {
-        return Some(Creds { token, username, source: "GitHub CLI" });
+        return Some(Creds {
+            token,
+            username,
+            source: "GitHub CLI",
+        });
     }
     // Trimmed here as well as in gh_token: the CLI prints the token with a newline, and a header
     // built from the raw line would be refused.
     let token = non_empty(command())?;
-    Some(Creds { token, username, source: "GitHub CLI" })
+    Some(Creds {
+        token,
+        username,
+        source: "GitHub CLI",
+    })
 }
 
 /// Re-read every time: `gh auth login` and `gh auth refresh` rotate the token underneath us.
 fn read_credentials() -> Option<Creds> {
+    if crate::accounts::active("copilot").is_some() {
+        if let Some(secret) = crate::accounts::secret("copilot") {
+            return credentials_from_saved(&secret);
+        }
+    }
     let hosts = hosts_path().and_then(|p| std::fs::read_to_string(p).ok());
     pick(env_token(), hosts.as_deref(), gh_token)
+}
+
+fn credentials_from_saved(secret: &str) -> Option<Creds> {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(secret) {
+        let token = non_empty(v.get("token").and_then(|v| v.as_str()).map(String::from))?;
+        return Some(Creds {
+            token,
+            username: v.get("username").and_then(|v| v.as_str()).map(String::from),
+            source: "saved GitHub account",
+        });
+    }
+    non_empty(Some(secret.to_string())).map(|token| Creds {
+        token,
+        username: None,
+        source: "saved GitHub account",
+    })
+}
+
+/// Reads the current external login only, for native encrypted import.
+pub(crate) fn capture_current_credential() -> Option<String> {
+    let hosts = external_config_dirs()
+        .iter()
+        .map(|p| p.join("hosts.yml"))
+        .find(|p| p.is_file())
+        .and_then(|p| std::fs::read_to_string(p).ok());
+    let env = non_empty(std::env::var("GH_TOKEN").ok())
+        .or_else(|| non_empty(std::env::var("GITHUB_TOKEN").ok()));
+    let c = pick(env, hosts.as_deref(), external_gh_token)?;
+    Some(serde_json::json!({"token": c.token, "username": c.username}).to_string())
 }
 
 /// For doctor: contains no secret values
@@ -252,15 +342,24 @@ pub fn probe() -> String {
         Some(p) => format!("gh at {}", p.display()),
         None => "gh.exe not found".into(),
     };
-    let env = if env_token().is_some() { "GH_TOKEN/GITHUB_TOKEN set" } else { "no environment token" };
+    let env = if env_token().is_some() {
+        "GH_TOKEN/GITHUB_TOKEN set"
+    } else {
+        "no environment token"
+    };
     match read_credentials() {
         Some(c) => format!(
             "GitHub Copilot: session borrowed via {} (token {} chars{}); {file}; {cli}; {env}",
             c.source,
             c.token.len(),
-            c.username.as_deref().map(|u| format!(", user {u}")).unwrap_or_default()
+            c.username
+                .as_deref()
+                .map(|u| format!(", user {u}"))
+                .unwrap_or_default()
         ),
-        None => format!("GitHub Copilot: no GitHub session (run gh auth login); {file}; {cli}; {env}"),
+        None => {
+            format!("GitHub Copilot: no GitHub session (run gh auth login); {file}; {cli}; {env}")
+        }
     }
 }
 
@@ -317,7 +416,12 @@ pub fn label(id: &str) -> String {
 
 /// The plan name, for the card's account line
 pub fn plan(v: &serde_json::Value) -> Option<String> {
-    non_empty(v.get("copilot_plan").or_else(|| v.get("plan")).and_then(|x| x.as_str()).map(|s| s.to_string()))
+    non_empty(
+        v.get("copilot_plan")
+            .or_else(|| v.get("plan"))
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string()),
+    )
 }
 
 fn window(id: &str, quota: &serde_json::Value, root: &serde_json::Value) -> Option<LimitWindow> {
@@ -329,7 +433,8 @@ fn window(id: &str, quota: &serde_json::Value, root: &serde_json::Value) -> Opti
         return None;
     }
     let remaining = number(quota.get("remaining"));
-    let consumed = number(quota.get("used")).unwrap_or_else(|| (entitlement - remaining.unwrap_or(entitlement)).max(0.0));
+    let consumed = number(quota.get("used"))
+        .unwrap_or_else(|| (entitlement - remaining.unwrap_or(entitlement)).max(0.0));
     let resets_at = date_ms(quota.get("reset_date"))
         .or_else(|| date_ms(quota.get("reset_at")))
         .or_else(|| date_ms(quota.get("resets_at")))
@@ -346,13 +451,27 @@ fn window(id: &str, quota: &serde_json::Value, root: &serde_json::Value) -> Opti
 /// reply → (windows, note). An empty list with a note means the account has nothing metered.
 pub fn parse(v: &serde_json::Value) -> (Vec<LimitWindow>, String) {
     let Some(quotas) = v.get("quota_snapshots").and_then(|x| x.as_object()) else {
-        return (Vec::new(), "GitHub Copilot returned no quota snapshots".into());
+        return (
+            Vec::new(),
+            "GitHub Copilot returned no quota snapshots".into(),
+        );
     };
-    let mut keys: Vec<&str> = ORDER.iter().copied().filter(|k| quotas.contains_key(*k)).collect();
-    let mut rest: Vec<&str> = quotas.keys().map(|k| k.as_str()).filter(|k| !ORDER.contains(k)).collect();
+    let mut keys: Vec<&str> = ORDER
+        .iter()
+        .copied()
+        .filter(|k| quotas.contains_key(*k))
+        .collect();
+    let mut rest: Vec<&str> = quotas
+        .keys()
+        .map(|k| k.as_str())
+        .filter(|k| !ORDER.contains(k))
+        .collect();
     rest.sort_unstable();
     keys.append(&mut rest);
-    let out: Vec<LimitWindow> = keys.iter().filter_map(|k| window(k, &quotas[*k], v)).collect();
+    let out: Vec<LimitWindow> = keys
+        .iter()
+        .filter_map(|k| window(k, &quotas[*k], v))
+        .collect();
     if out.is_empty() {
         return (out, "GitHub Copilot reported no metered quotas".into());
     }
@@ -361,12 +480,14 @@ pub fn parse(v: &serde_json::Value) -> (Vec<LimitWindow>, String) {
 
 enum FetchErr {
     NeedsAuth,
-    RateLimited,
+    RateLimited(u64),
     Other(String),
 }
 
 fn fetch_once(token: &str) -> Result<serde_json::Value, FetchErr> {
-    let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(15)).build();
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(15))
+        .build();
     match agent
         .get(ENDPOINT)
         .set("Authorization", &format!("Bearer {token}"))
@@ -375,23 +496,41 @@ fn fetch_once(token: &str) -> Result<serde_json::Value, FetchErr> {
         .set("User-Agent", "Codenotch")
         .call()
     {
-        Ok(r) => r.into_json::<serde_json::Value>().map_err(|e| FetchErr::Other(format!("parse: {e}"))),
-        Err(ureq::Error::Status(401, _)) | Err(ureq::Error::Status(403, _)) => Err(FetchErr::NeedsAuth),
-        Err(ureq::Error::Status(429, _)) => Err(FetchErr::RateLimited),
+        Ok(r) => r
+            .into_json::<serde_json::Value>()
+            .map_err(|e| FetchErr::Other(format!("parse: {e}"))),
+        Err(ureq::Error::Status(401, _)) | Err(ureq::Error::Status(403, _)) => {
+            Err(FetchErr::NeedsAuth)
+        }
+        Err(ureq::Error::Status(429, response)) => Err(FetchErr::RateLimited(
+            response
+                .header("retry-after")
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(60)
+                .max(60),
+        )),
         Err(ureq::Error::Status(code, _)) => Err(FetchErr::Other(format!("HTTP {code}"))),
         Err(e) => Err(FetchErr::Other(format!("{e}"))),
     }
 }
 
-fn read_once(prev: &UsageSnapshot) -> UsageSnapshot {
+fn read_once(prev: &UsageSnapshot, captured: Option<Creds>) -> UsageSnapshot {
     let mut snap = prev.clone();
-    let Some(creds) = read_credentials() else {
+    if snap.backoff_until > now_ms() {
+        snap.note = format!(
+            "Rate limited — retrying in {}s",
+            snap.backoff_until.saturating_sub(now_ms()) / 1000
+        );
+        return snap;
+    }
+    let Some(creds) = captured else {
         snap.status = "needsAuth".into();
         snap.note = "Run gh auth login — Codenotch borrows the GitHub CLI's session.".into();
         return snap;
     };
     match fetch_once(&creds.token) {
         Ok(v) => {
+            snap.backoff_until = 0;
             let (windows, note) = parse(&v);
             snap.fetched_at = now_ms();
             if windows.is_empty() {
@@ -416,69 +555,111 @@ fn read_once(prev: &UsageSnapshot) -> UsageSnapshot {
             snap.status = "needsAuth".into();
             snap.note = "GitHub session was rejected — run gh auth login again".into();
         }
-        Err(FetchErr::RateLimited) => {
-            snap.status = if snap.windows.is_empty() { "error" } else { "stale" }.into();
+        Err(FetchErr::RateLimited(wait)) => {
+            snap.backoff_until = now_ms().saturating_add(wait.saturating_mul(1000));
+            snap.status = if snap.windows.is_empty() {
+                "error"
+            } else {
+                "stale"
+            }
+            .into();
             snap.note = "GitHub is rate limiting; the last reading stands".into();
         }
         Err(FetchErr::Other(msg)) => {
             // Stale beats invented: keep the old reading, marked stale
-            snap.status = if snap.windows.is_empty() { "error" } else { "stale" }.into();
+            snap.status = if snap.windows.is_empty() {
+                "error"
+            } else {
+                "stale"
+            }
+            .into();
             snap.note = msg;
         }
     }
     snap
 }
 
-fn broadcast(app: &AppHandle, snap: UsageSnapshot) {
-    let st = app.state::<AppState>();
-    *st.copilot.lock().unwrap() = snap.clone();
-    persist(&snap);
-    let _ = app.emit("copilot", &snap);
-}
-
-fn sleep_interruptible(secs: u64) {
-    for _ in 0..secs {
-        if REFRESH.swap(false, std::sync::atomic::Ordering::Relaxed) {
-            return;
-        }
-        std::thread::sleep(Duration::from_secs(1));
-    }
+fn broadcast(app: &AppHandle, snap: UsageSnapshot, selection: &str) {
+    let _ = crate::accounts::with_selection("copilot", selection, || {
+        let st = app.state::<AppState>();
+        *st.copilot.lock().unwrap() = snap.clone();
+        let _ = app.emit("copilot", &snap);
+    });
 }
 
 pub fn start(app: AppHandle) {
     std::thread::spawn(move || {
-        {
-            let st = app.state::<AppState>();
-            let snap = st.copilot.lock().unwrap().clone();
-            let _ = app.emit("copilot", &snap);
-        }
-        if !present() {
-            broadcast(&app, UsageSnapshot { status: "absent".into(), ..Default::default() });
-            loop {
-                sleep_interruptible(600); // GitHub CLI is not installed: look again every 10 minutes
-                if present() {
+        loop {
+            let selection = crate::accounts::selection_key("copilot");
+            // Freeze the credential and its cache while account switching is
+            // locked. Network I/O then runs without holding the settings lock.
+            let Some((prev, cache, creds, installed)) =
+                crate::accounts::with_selection("copilot", &selection, || {
+                    (
+                        load_persisted(),
+                        store_path(),
+                        read_credentials(),
+                        present(),
+                    )
+                })
+            else {
+                continue;
+            };
+            let snap = if installed {
+                read_once(&prev, creds)
+            } else {
+                UsageSnapshot {
+                    status: "absent".into(),
+                    ..Default::default()
+                }
+            };
+            let hold = snap.backoff_until.saturating_sub(now_ms()) / 1000;
+            // An old credential must not restore cached usage after a profile
+            // reconnect. Preserve only provider Retry-After on rejected reads.
+            if crate::accounts::with_selection("copilot", &selection, || {
+                crate::agy_cli::save_persisted_to(&cache, &snap)
+            })
+            .is_none()
+            {
+                crate::accounts::preserve_backoff(&cache, snap.backoff_until);
+            }
+            broadcast(&app, snap, &selection);
+            for _ in 0..POLL_SECS.max(hold) {
+                if REFRESH.swap(false, std::sync::atomic::Ordering::Relaxed) {
                     break;
                 }
+                std::thread::sleep(Duration::from_secs(1));
             }
-        }
-        loop {
-            let prev = {
-                let st = app.state::<AppState>();
-                let s = st.copilot.lock().unwrap().clone();
-                s
-            };
-            let snap = read_once(&prev);
-            if snap.status == "error" || snap.status == "stale" {
-                crate::applog(&format!("copilot: {}", snap.note));
-            }
-            broadcast(&app, snap);
-            sleep_interruptible(POLL_SECS);
         }
     });
 }
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_selected_accounts_retry_after_is_not_bypassed_by_refresh() {
+        let prev = UsageSnapshot {
+            backoff_until: now_ms() + 120_000,
+            note: "previous".into(),
+            ..Default::default()
+        };
+        let snap = read_once(&prev, None);
+        assert_eq!(snap.backoff_until, prev.backoff_until);
+        assert!(snap.note.starts_with("Rate limited"));
+    }
+
+    #[test]
+    fn saved_git_hub_credentials_keep_their_own_identity() {
+        let a =
+            credentials_from_saved(r#"{"token":"account-a-token","username":"alice"}"#).unwrap();
+        let b = credentials_from_saved(r#"{"token":"account-b-token","username":"bob"}"#).unwrap();
+        assert_eq!(a.username.as_deref(), Some("alice"));
+        assert_eq!(b.username.as_deref(), Some("bob"));
+        assert_ne!(a.token, b.token);
+        assert!(credentials_from_saved(r#"{"token":""}"#).is_none());
+    }
+
     use super::*;
 
     const REPLY: &str = r#"{"copilot_plan":"individual","quota_reset_date":"2026-10-01T00:00:00Z",
@@ -492,11 +673,18 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(REPLY).unwrap();
         let (w, note) = parse(&v);
         assert!(note.is_empty());
-        assert_eq!(w.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), ["premium_interactions", "chat", "completions"]);
+        assert_eq!(
+            w.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(),
+            ["premium_interactions", "chat", "completions"]
+        );
         assert_eq!(w[0].label, "Premium requests");
         assert!((w[0].used - 0.02).abs() < 1e-9);
         assert!((w[1].used - 0.04).abs() < 1e-9);
-        assert_eq!(w[0].resets_at, Some(1_790_812_800_000), "midnight UTC on 1 October 2026");
+        assert_eq!(
+            w[0].resets_at,
+            Some(1_790_812_800_000),
+            "midnight UTC on 1 October 2026"
+        );
         assert_eq!(plan(&v).as_deref(), Some("individual"));
     }
 
@@ -509,7 +697,11 @@ mod tests {
         let (w, _) = parse(&v);
         assert_eq!(w.len(), 1);
         assert!((w[0].used - 0.5).abs() < 1e-9);
-        assert_eq!(w[0].resets_at, Some(1_790_812_800_000), "seconds are scaled to milliseconds");
+        assert_eq!(
+            w[0].resets_at,
+            Some(1_790_812_800_000),
+            "seconds are scaled to milliseconds"
+        );
     }
 
     /// The shape a Business account actually answers with (numbers changed): no `used`, a
@@ -531,9 +723,17 @@ mod tests {
         assert_eq!(w.len(), 1, "unlimited chat and completions draw nothing");
         assert_eq!(w[0].id, "premium_interactions");
         assert_eq!(w[0].used, 1.0, "over the allowance is full, not 121 %");
-        assert_eq!(w[0].resets_at, Some(1_790_812_800_000), "the bare date is midnight UTC on 1 October 2026");
+        assert_eq!(
+            w[0].resets_at,
+            Some(1_790_812_800_000),
+            "the bare date is midnight UTC on 1 October 2026"
+        );
         assert_eq!(plan(&v).as_deref(), Some("business"));
-        assert_eq!(date_ms(Some(&serde_json::json!(0))), None, "a zero reset is unstated, not 1970");
+        assert_eq!(
+            date_ms(Some(&serde_json::json!(0))),
+            None,
+            "a zero reset is unstated, not 1970"
+        );
     }
 
     #[test]
@@ -558,25 +758,34 @@ mod tests {
         )
         .unwrap();
         let (w, _) = parse(&v);
-        assert_eq!(w.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), ["premium_interactions", "agent_mode_requests"]);
+        assert_eq!(
+            w.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(),
+            ["premium_interactions", "agent_mode_requests"]
+        );
         assert_eq!(w[1].label, "Agent Mode Requests");
     }
 
     #[test]
     fn overspend_is_clamped_to_full() {
-        let v: serde_json::Value =
-            serde_json::from_str(r#"{"quota_snapshots":{"premium_interactions":{"entitlement":300,"used":420}}}"#).unwrap();
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"quota_snapshots":{"premium_interactions":{"entitlement":300,"used":420}}}"#,
+        )
+        .unwrap();
         let (w, _) = parse(&v);
         assert_eq!(w[0].used, 1.0);
     }
 
-    const HOSTS: &str = "github.com:\n    user: octocat\n    oauth_token: cli-token\n    git_protocol: https\n";
+    const HOSTS: &str =
+        "github.com:\n    user: octocat\n    oauth_token: cli-token\n    git_protocol: https\n";
 
     #[test]
-    fn environment_token_wins_but_the_file_still_names_the_user() {
-        let c = pick(Some("env-token".into()), Some(HOSTS), || panic!("gh must not be launched")).unwrap();
+    fn environment_token_does_not_claim_an_unrelated_file_user() {
+        let c = pick(Some("env-token".into()), Some(HOSTS), || {
+            panic!("gh must not be launched")
+        })
+        .unwrap();
         assert_eq!(c.token, "env-token");
-        assert_eq!(c.username.as_deref(), Some("octocat"));
+        assert_eq!(c.username, None);
         assert_eq!(c.source, "GitHub");
     }
 
@@ -605,11 +814,18 @@ mod tests {
         assert_eq!(c.token, "public");
         assert_eq!(c.username.as_deref(), Some("bob"));
         let only_ghe = "ghe.example.com:\n    user: alice\n    oauth_token: enterprise\n";
-        assert_eq!(parse_hosts(only_ghe), (None, None), "an Enterprise token is never sent to api.github.com");
+        assert_eq!(
+            parse_hosts(only_ghe),
+            (None, None),
+            "an Enterprise token is never sent to api.github.com"
+        );
     }
 
     #[test]
     fn quoted_values_are_unquoted() {
-        assert_eq!(parse_hosts("github.com:\n  user: \"octocat\"\n  oauth_token: 'tok'\n"), (Some("octocat".into()), Some("tok".into())));
+        assert_eq!(
+            parse_hosts("github.com:\n  user: \"octocat\"\n  oauth_token: 'tok'\n"),
+            (Some("octocat".into()), Some("tok".into()))
+        );
     }
 }

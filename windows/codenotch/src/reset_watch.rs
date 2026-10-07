@@ -133,6 +133,31 @@ impl ResetWatcher {
     }
 }
 
+/// A provider's selected account can change between polls, including A → B → A before the watcher
+/// sees B. The selection key includes the account transition revision, so no two accounts — or
+/// two visits to the same account — can be mistaken for consecutive quota observations.
+#[derive(Default)]
+struct AccountResetWatcher {
+    selection: Option<String>,
+    watcher: ResetWatcher,
+}
+
+impl AccountResetWatcher {
+    fn observe(
+        &mut self,
+        provider: &str,
+        selection: &str,
+        snapshot: &UsageSnapshot,
+        now: u64,
+    ) -> Vec<ResetEvent> {
+        if self.selection.as_deref() != Some(selection) {
+            self.selection = Some(selection.to_owned());
+            self.watcher = ResetWatcher::default();
+        }
+        self.watcher.observe(provider, snapshot, now)
+    }
+}
+
 /// Watches every provider the tray menu knows about, each with its own `ResetWatcher`, and turns a
 /// detected renewal into a card via `reset_alert::enqueue`. Polled rather than hooked into each
 /// provider's own loop: providers already publish to `AppState` on their own schedule, so reading
@@ -140,15 +165,20 @@ impl ResetWatcher {
 /// wired into `codex.rs`, `cursor.rs`, `glm.rs`, `opencode.rs`, `grok.rs` and `antigravity.rs`.
 pub fn start(app: tauri::AppHandle) {
     std::thread::spawn(move || {
-        let mut watchers: HashMap<&'static str, ResetWatcher> = HashMap::new();
+        let mut watchers: HashMap<&'static str, AccountResetWatcher> = HashMap::new();
         loop {
             let now = crate::now_ms();
             for &id in crate::TRAY_PROVIDER_IDS.iter() {
-                let snap = crate::snapshot_of(&app, id);
-                let watcher = watchers.entry(id).or_default();
-                for event in watcher.observe(id, &snap, now) {
-                    crate::reset_alert::enqueue(&app, event);
-                }
+                let selection = crate::accounts::selection_key(id);
+                // Selection changes use the same gate as usage publication. The captured reading,
+                // baseline update and queued card must all belong to this exact account revision.
+                let _ = crate::accounts::with_selection(id, &selection, || {
+                    let snap = crate::snapshot_of(&app, id);
+                    let watcher = watchers.entry(id).or_default();
+                    for event in watcher.observe(id, &selection, &snap, now) {
+                        crate::reset_alert::enqueue(&app, event, &selection);
+                    }
+                });
             }
             std::thread::sleep(std::time::Duration::from_secs(5));
         }
@@ -167,6 +197,30 @@ mod tests {
 
     fn snapshot(at: u64, windows: Vec<LimitWindow>) -> UsageSnapshot {
         UsageSnapshot { status: "ok".into(), fetched_at: at, windows, ..Default::default() }
+    }
+
+    #[test]
+    fn switching_accounts_without_observing_the_clear_cannot_trigger_a_reset() {
+        let mut watcher = AccountResetWatcher::default();
+        let account_a = snapshot(NOW - 2_000, vec![window("primary", 0.80, Some(NOW - 1_000))]);
+        let account_b = snapshot(NOW, vec![window("primary", 0.01, Some(NOW + 300 * 60_000))]);
+        assert!(watcher.observe("codex", "account-a:1", &account_a, NOW).is_empty());
+        // B finished loading before the five-second observer saw the temporary empty reading.
+        assert!(watcher.observe("codex", "account-b:2", &account_b, NOW).is_empty());
+        let used_b = snapshot(NOW + 120_000, vec![window("primary", 0.60, Some(NOW + 121_000))]);
+        let renewed_b = snapshot(NOW + 122_000, vec![window("primary", 0.02, Some(NOW + 300 * 60_000))]);
+        assert!(watcher.observe("codex", "account-b:2", &used_b, NOW + 120_000).is_empty());
+        assert_eq!(watcher.observe("codex", "account-b:2", &renewed_b, NOW + 122_000).len(), 1);
+    }
+
+    #[test]
+    fn returning_to_the_same_account_before_the_next_poll_starts_a_new_baseline() {
+        let mut watcher = AccountResetWatcher::default();
+        let before = snapshot(NOW - 2_000, vec![window("primary", 0.80, Some(NOW - 1_000))]);
+        let after = snapshot(NOW, vec![window("primary", 0.01, Some(NOW + 300 * 60_000))]);
+        assert!(watcher.observe("codex", "account-a:1", &before, NOW).is_empty());
+        // B was selected and A was reselected between observer ticks; the revision still changes.
+        assert!(watcher.observe("codex", "account-a:3", &after, NOW).is_empty());
     }
 
     #[test]

@@ -86,3 +86,10 @@ test('personal quota cards keep their scope and never show an announcement sourc
   assert.equal(view.document.body.dataset.scope, 'personal');
   assert.equal(view.node('source').hidden, true);
 });
+
+test('banked cards have their own visual kind while retaining public scope and attribution',()=>{
+  const view=render({kind:'banked_reset',scope:'global',title:'Banked status update',status:'Check availability in your account',source_label:'View source',next:'Source: codex-reset.com'});
+  assert.equal(view.document.body.dataset.kind,'banked_reset');
+  assert.equal(view.document.body.dataset.scope,'global');
+  assert.equal(view.node('status').textContent,'Check availability in your account');
+});

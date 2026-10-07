@@ -130,6 +130,9 @@ pub struct Config {
     /// account quota renewals. Historical forecasts and hints never trigger this card.
     #[serde(default = "yes")]
     pub global_reset_notifications: bool,
+    /// Public banked-reset lifecycle announcements; never a claim about an account's own balance.
+    #[serde(default = "yes")]
+    pub banked_reset_notifications: bool,
     /// false = the reset card above appears silently, with no notification sound.
     #[serde(default = "yes")]
     pub reset_notification_sound: bool,
@@ -312,6 +315,7 @@ impl Default for Config {
             tray_visible: true,
             reset_notifications: true,
             global_reset_notifications: true,
+            banked_reset_notifications: true,
             reset_notification_sound: true,
             adaptive_pill: false,
         }
@@ -436,14 +440,16 @@ mod tests {
         let old: Config = serde_json::from_str(r#"{"notch_visible":false,"theme":"light"}"#).unwrap();
         assert!(old.reset_notifications);
         assert!(old.global_reset_notifications);
+        assert!(old.banked_reset_notifications);
         assert!(old.reset_notification_sound);
         assert!(!old.notch_visible);
         assert_eq!(old.theme, "light");
-        let chosen = Config { reset_notifications: false, global_reset_notifications: false, reset_notification_sound: false, ..old };
+        let chosen = Config { reset_notifications: false, global_reset_notifications: false, banked_reset_notifications: false, reset_notification_sound: false, ..old };
         let saved = serde_json::to_string(&chosen).unwrap();
         let restored: Config = serde_json::from_str(&saved).unwrap();
         assert!(!restored.reset_notifications);
         assert!(!restored.global_reset_notifications);
+        assert!(!restored.banked_reset_notifications);
         assert!(!restored.reset_notification_sound);
         assert!(!restored.notch_visible);
         assert_eq!(restored.theme, "light");
