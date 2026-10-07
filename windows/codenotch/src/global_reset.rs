@@ -198,8 +198,9 @@ fn source_link(value: Option<&Value>) -> Option<String> {
 }
 
 fn parse_timeline(value: &Value, now: u64) -> Result<(u64, Vec<ConfirmedReset>), String> {
-    let updated_at =
-        timestamp(value.get("updated_at")).ok_or("Timeline has no valid update time")?;
+    // Timeline update metadata is useful but not part of the documented stable event contract.
+    // Publication freshness comes from the response headers; an omitted date stays unknown.
+    let updated_at = timestamp(value.get("updated_at")).unwrap_or(0);
     let events = value
         .get("events")
         .and_then(Value::as_array)
@@ -605,7 +606,10 @@ mod tests {
             Some("https://x.com/example/status/1")
         );
         assert!(source_link(Some(&json!("javascript:alert(1)"))).is_none());
-        assert!(parse_timeline(&json!({"events":[]}), NOW).is_err());
+        assert!(parse_timeline(&json!({"events":{}}), NOW).is_err());
+        let (unknown_update, empty) = parse_timeline(&json!({"events":[]}), NOW).unwrap();
+        assert_eq!(unknown_update, 0);
+        assert!(empty.is_empty());
     }
 
     #[test]
