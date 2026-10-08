@@ -206,7 +206,11 @@ pub fn find_cli() -> Option<PathBuf> {
 
 /// `grok models` starts up (where the CLI renews an aged token), prints the model list and exits:
 /// no session, no transcript, no allowance spent. Output goes nowhere.
-fn run_renewal(cli: &std::path::Path, auth: &std::path::Path) -> std::io::Result<()> {
+fn run_renewal(
+    cli: &std::path::Path,
+    auth: &std::path::Path,
+    cancelled: Option<&std::sync::atomic::AtomicBool>,
+) -> std::io::Result<()> {
     use std::process::{Command, Stdio};
     let mut cmd = Command::new(cli);
     cmd.arg("models")
@@ -216,8 +220,7 @@ fn run_renewal(cli: &std::path::Path, auth: &std::path::Path) -> std::io::Result
     // Which session gets renewed is said here, never inherited: a GROK_HOME pointed elsewhere would
     // renew that copy while the file read here stayed stale
     if let Some(dir) = auth.parent() {
-        cmd.env("GROK_HOME", dir);
-        cmd.env_remove("GROK_API_KEY").env_remove("XAI_API_KEY");
+        crate::profile_auth::sanitize_grok_auth_env(&mut cmd, dir);
     }
     #[cfg(windows)]
     {
@@ -227,7 +230,9 @@ fn run_renewal(cli: &std::path::Path, auth: &std::path::Path) -> std::io::Result
     let mut child = cmd.spawn()?;
     let deadline = std::time::Instant::now() + Duration::from_secs(RENEW_TIMEOUT_SECS);
     while child.try_wait()?.is_none() {
-        if std::time::Instant::now() >= deadline {
+        if std::time::Instant::now() >= deadline
+            || cancelled.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire))
+        {
             let _ = child.kill();
             let _ = child.wait();
             break;
@@ -248,7 +253,12 @@ struct Renewer {
 impl Renewer {
     /// Renews if the token is about to expire. Some(true) = the expiry moved; judged on the file, never on
     /// the exit status
-    fn maybe_renew(&mut self, creds: &Creds, auth: Option<&std::path::Path>) -> Option<bool> {
+    fn maybe_renew(
+        &mut self,
+        creds: &Creds,
+        auth: Option<&std::path::Path>,
+        cancelled: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Option<bool> {
         // The immutable auth path was captured with the credential. Imported
         // secrets have no CLI refresh store and cannot renew another account.
         let auth = auth?;
@@ -271,11 +281,11 @@ impl Renewer {
         self.last_attempt = Some(now);
         self.attempted_for = expires_at;
         self.failures = self.failures.saturating_add(1);
-        let Some(cli) = find_cli() else {
+        let Some(cli) = crate::profile_auth::grok_browser_cli() else {
             crate::applog("grok: token about to expire and no grok CLI found to renew it");
             return Some(false);
         };
-        if let Err(e) = run_renewal(&cli, auth) {
+        if let Err(e) = run_renewal(&cli, auth, cancelled) {
             crate::applog(&format!(
                 "grok: token renewal could not start ({}): {e}",
                 cli.display()
@@ -465,6 +475,7 @@ fn read_once(
     captured: Option<Creds>,
     auth: Option<&std::path::Path>,
     renewer: &mut Renewer,
+    selection: Option<&str>,
 ) -> UsageSnapshot {
     let mut snap = prev.clone();
     if snap.backoff_until > now_ms() {
@@ -479,7 +490,18 @@ fn read_once(
         snap.note = "Run grok login — it signs in and refreshes the token this reads.".into();
         return snap;
     };
-    if renewer.maybe_renew(&creds, auth) == Some(true) {
+    let renewal_guard = auth.and_then(|_| selection).and_then(|selection| {
+        crate::accounts::with_selection("grok", selection, || {
+            let id = crate::accounts::active("grok")
+                .map(|ctx| ctx.id)
+                .unwrap_or_else(|| "external".into());
+            crate::profile_auth::reserve_profile_work("grok", &id).ok()
+        })
+        .flatten()
+    });
+    if renewal_guard.as_ref().is_some_and(|guard| {
+        renewer.maybe_renew(&creds, auth, Some(guard.cancelled())) == Some(true)
+    }) {
         if let Some(fresh) = auth
             .and_then(|p| std::fs::read_to_string(p).ok())
             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
@@ -488,6 +510,7 @@ fn read_once(
             creds = fresh;
         }
     }
+    drop(renewal_guard);
     // An expired token is still worth sending: the CLI may have refreshed the file since it was
     // written, and only the endpoint can say. A 401 below is what actually decides it.
     match fetch_once(&creds.token) {
@@ -570,6 +593,7 @@ pub fn start(app: AppHandle) {
                     creds,
                     auth.as_deref(),
                     renewers.entry(selection.clone()).or_default(),
+                    Some(&selection),
                 )
             } else {
                 UsageSnapshot {
@@ -608,7 +632,7 @@ mod tests {
             note: "previous".into(),
             ..Default::default()
         };
-        let snap = read_once(&prev, None, None, &mut Renewer::default());
+        let snap = read_once(&prev, None, None, &mut Renewer::default(), None);
         assert_eq!(snap.backoff_until, prev.backoff_until);
         assert!(snap.note.starts_with("Rate limited"));
     }
@@ -707,7 +731,11 @@ mod tests {
     fn a_session_without_an_expiry_is_never_renewed_on_a_guess() {
         let mut r = Renewer::default();
         assert_eq!(
-            r.maybe_renew(&creds(0), Some(std::path::Path::new("synthetic/auth.json"))),
+            r.maybe_renew(
+                &creds(0),
+                Some(std::path::Path::new("synthetic/auth.json")),
+                None
+            ),
             None
         );
         assert_eq!(r.last_attempt, None);
@@ -719,7 +747,8 @@ mod tests {
         assert_eq!(
             r.maybe_renew(
                 &creds(now_ms() + 60 * 60 * 1000),
-                Some(std::path::Path::new("synthetic/auth.json"))
+                Some(std::path::Path::new("synthetic/auth.json")),
+                None
             ),
             None
         );

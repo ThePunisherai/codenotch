@@ -226,6 +226,14 @@
   .profile-controls .btn{font-size:10px;padding:4px 8px}
   .profile-controls .remove{background:transparent;color:var(--text2)}
   .profile-login-note{font-size:10px;color:var(--text2);line-height:1.5;margin-top:7px;overflow-wrap:anywhere}
+  .profile-browser{margin-top:12px;padding:12px;border:1px solid rgba(10,122,255,.22);border-radius:10px;background:rgba(10,122,255,.06)}
+  .profile-browser-title{font-size:12px;font-weight:600}
+  .profile-browser-detail{font-size:11px;color:var(--text2);line-height:1.5;margin-top:5px;overflow-wrap:anywhere}
+  .profile-browser-code{display:block;width:fit-content;margin-top:10px;padding:8px 12px;border:1px solid var(--line);border-radius:7px;background:var(--seg-bg);font:600 18px/1.2 "Cascadia Mono",Consolas,monospace;letter-spacing:1.5px;user-select:text}
+  .profile-browser-actions{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-top:10px}
+  .profile-browser-actions .btn{font-size:11px;padding:5px 9px}
+  .profile-browser-actions .primary{background:var(--accent);color:var(--on-accent)}
+  .profile-browser-expiry{font-size:10px;color:var(--text2);margin-top:8px}
   .profile-provider-note{padding:0 12px 11px;font-size:10px;color:var(--text2);line-height:1.5}
   .profile-empty{padding:0 12px 12px;color:var(--text2);font-size:11px}
   .profile-empty .link{font-size:11px}
@@ -241,6 +249,7 @@
   .profile-dialog-actions{display:flex;justify-content:flex-end;gap:7px;margin-top:16px}
   .profile-dialog .primary{background:var(--accent);color:var(--on-accent)}
   #profile-dialog-error{color:var(--danger);font-size:11px;line-height:1.5;margin-top:10px}
+  #browser-code-error{color:var(--danger);font-size:11px;line-height:1.5;margin-top:10px}
   @media (max-width:560px){#side{width:165px}.reset-cards{grid-template-columns:1fr}.reset-hero{padding:14px}.reset-hero h2{font-size:18px}}
 </style>
 </head>
@@ -403,6 +412,16 @@
     <div id="profile-key-fields" hidden><label for="profile-credential">API key or provider token</label><input id="profile-credential" type="password" autocomplete="new-password" spellcheck="false"><p>The key is sent directly to Codenotch and stored encrypted on this Windows account. It is never shown again.</p></div>
     <p id="profile-dialog-note" data-dynamic></p><div id="profile-dialog-error" data-dynamic role="status" hidden></div>
     <div class="profile-dialog-actions"><button class="btn" type="button" id="btn-profile-back">Cancel</button><button class="btn primary" type="submit" id="btn-profile-submit" data-dynamic>Create and connect</button></div>
+  </form>
+</dialog>
+<dialog id="browser-code-dialog" class="profile-dialog" aria-labelledby="browser-code-title">
+  <form id="browser-code-form">
+    <div class="profile-dialog-head"><h2 id="browser-code-title">Finish browser sign-in</h2><button class="btn" type="button" id="btn-browser-code-close" aria-label="Close browser sign-in code">×</button></div>
+    <p>Only use this if the provider’s browser page asks you to paste a code. Sign-in usually finishes automatically.</p>
+    <label for="browser-signin-code">Code from the provider’s sign-in page</label><input id="browser-signin-code" type="password" maxlength="4096" autocomplete="new-password" spellcheck="false" required>
+    <p>The code is sent once to the pending sign-in and is cleared immediately.</p>
+    <div id="browser-code-error" role="status" hidden></div>
+    <div class="profile-dialog-actions"><button class="btn" type="button" id="btn-browser-code-cancel">Cancel</button><button class="btn primary" type="submit" id="btn-browser-code-submit">Complete sign-in</button></div>
   </form>
 </dialog>
 <div id="toast" data-dynamic>Saved</div>
@@ -1515,11 +1534,13 @@ accountsPane.addEventListener('change', e => {
 });
 
 /* ---- account profiles -----------------------------------------------------
-   Only profile labels, identities and credential/authentication status reach this page. Existing
-   credentials stay in the native process. A manually entered key is cleared before its IPC call. */
+   Only profile metadata and public browser challenges reach this page. Existing credentials stay
+   in the native process. Manually entered keys and callback codes are cleared before their IPC call. */
 let accountProfilesState = null, accountProfilesRevision = 0, accountActionBusy = false;
 const accountLoginStates = new Map();
+const accountLoginRevisions = new Map();
 let profileDialogMode = 'create', profileDialogTarget = null;
+let browserCodeTarget = null, browserExpiryNodes = [];
 const accountNode = id => document.getElementById(id);
 function accountProviders(){
   return accountProfilesState && Array.isArray(accountProfilesState.providers) ? accountProfilesState.providers.filter(p => p && typeof p.id === 'string') : [];
@@ -1562,8 +1583,51 @@ function profileAuthStatus(account, now){
   if(account.status === 'saved' || account.status === 'connected') return {label:'Credentials saved',status:'saved'};
   return {label:'Sign in needed',status:'needsAuth'};
 }
+function profileChallengeUrl(provider, value){
+  if(typeof value !== 'string' || value.length > 8192)return '';
+  try{
+    const url = new URL(value);
+    const hosts = {codex:['auth.openai.com'],claude:['claude.ai','claude.com'],copilot:['github.com'],grok:['auth.x.ai'],opencode:['opencode.ai']};
+    if(url.protocol !== 'https:' || url.username || url.password || !hosts[provider]?.includes(url.hostname))return '';
+    for(const key of url.searchParams.keys())if(/^(device_code|access_token|refresh_token|id_token|client_secret)$/i.test(key))return '';
+    return url.href;
+  }catch(_){return '';}
+}
+function profileChallengeCode(value){
+  return typeof value === 'string' && /^[a-z0-9-]{4,64}$/i.test(value) ? value : '';
+}
+function browserExpiryCopy(expiresAt, now){
+  if(typeof expiresAt !== 'number' || !Number.isFinite(expiresAt) || expiresAt<=0)return '';
+  const seconds = Math.max(0,Math.ceil((expiresAt-now)/1000));
+  return seconds ? ui('Code expires in','Code expires in') + ' ' + Math.floor(seconds/60) + ':' + String(seconds%60).padStart(2,'0')
+    : ui('This sign-in request has expired. Start a new sign-in.','This sign-in request has expired. Start a new sign-in.');
+}
+function renderBrowserSigninClock(now = Date.now()){
+  for(const clock of browserExpiryNodes){
+    const copy = browserExpiryCopy(clock.expiresAt,now);
+    if(clock.node.textContent !== copy)clock.node.textContent = copy;
+  }
+}
+function browserSigninPanel(provider, account, login){
+  const box = profileElement('div','profile-browser');
+  box.appendChild(profileElement('div','profile-browser-title',ui('Finish sign-in in your browser','Finish sign-in in your browser')));
+  box.appendChild(profileElement('div','profile-browser-detail',ui('Use the account you want for this profile. Codenotch does not see your password.','Use the account you want for this profile. Codenotch does not see your password.')));
+  if(login.url)box.appendChild(profileElement('div','profile-browser-detail',new URL(login.url).hostname));
+  if(login.user_code)box.appendChild(profileElement('code','profile-browser-code',login.user_code));
+  const buttons = profileElement('div','profile-browser-actions');
+  if(login.url)buttons.appendChild(profileButton('Open browser','reopen',provider.id,account.id,'primary'));
+  if(login.user_code)buttons.appendChild(profileButton('Copy code','copy-code',provider.id,account.id));
+  if(provider.id==='claude' && login.url)buttons.appendChild(profileButton('Paste browser code','browser-code',provider.id,account.id));
+  buttons.appendChild(profileButton('Cancel sign-in','cancel-login',provider.id,account.id,'remove'));box.appendChild(buttons);
+  if(login.expires_at){
+    const expiry = profileElement('div','profile-browser-expiry',browserExpiryCopy(login.expires_at,Date.now()));
+    box.appendChild(expiry);browserExpiryNodes.push({node:expiry,expiresAt:login.expires_at});
+  }
+  return box;
+}
 function renderAccountProfiles(){
   const holder = accountNode('account-profiles'); holder.replaceChildren();
+  browserExpiryNodes = [];
   const providers = accountProviders();
   accountNode('btn-account-add').disabled = accountActionBusy || !providers.length;
   accountNode('btn-account-detect').disabled = accountActionBusy;
@@ -1578,7 +1642,7 @@ function renderAccountProfiles(){
     const title = profileElement('div','profile-provider-title');
     title.appendChild(profileProviderGlyph(provider));
     title.appendChild(profileElement('span','',provider.label || provider.id)); head.appendChild(title);
-    head.appendChild(profileElement('span','profile-capability',{cli:'CLI sign-in',desktop:'App connection',api_key:'API key'}[provider.login_mode] || 'Provider connection'));
+    head.appendChild(profileElement('span','profile-capability',{browser:'Browser sign-in',cli:'Browser sign-in',desktop_web:'App + browser',desktop:'App connection',api_key:'API key'}[provider.login_mode] || 'Provider connection'));
     box.appendChild(head);
     const accounts = Array.isArray(provider.accounts) ? provider.accounts.filter(a => a && typeof a.id === 'string') : [];
     if(!accounts.length){
@@ -1602,11 +1666,12 @@ function renderAccountProfiles(){
       if(!active) controls.appendChild(profileButton('Use','select',provider.id,account.id));
       if(provider.login_mode === 'api_key' || provider.manual_key_available) controls.appendChild(profileButton('Connect key','key',provider.id,account.id));
       if(provider.login_mode !== 'api_key' && provider.login_available){
-        const signin = profileButton(provider.login_mode === 'desktop' ? 'Open sign-in' : auth.status === 'connected' ? 'Sign in again' : 'Sign in','login',provider.id,account.id);
+        const signin = profileButton(provider.login_mode === 'desktop' ? 'Open sign-in' : 'Browser sign-in','login',provider.id,account.id);
         signin.disabled = accountActionBusy || !!(login && login.busy); controls.appendChild(signin);
       }
       controls.appendChild(profileButton('Remove','remove',provider.id,account.id,'remove')); bottom.appendChild(controls); row.appendChild(bottom);
       if(login && login.note) row.appendChild(profileElement('div','profile-login-note',String(login.note).slice(0,300)));
+      if(login && login.busy)row.appendChild(browserSigninPanel(provider,account,login));
       box.appendChild(row);
     }
     if(provider.login_note) box.appendChild(profileElement('div','profile-provider-note',String(provider.login_note).slice(0,360)));
@@ -1617,6 +1682,9 @@ function applyAccountProfiles(state){
   if(!state || !Array.isArray(state.providers)) return;
   const previous = activeProfileFor('codex');
   accountProfilesState = state;
+  const knownAccounts = new Set(accountProviders().flatMap(p => (Array.isArray(p.accounts)?p.accounts:[]).map(a=>p.id+':'+a.id)));
+  for(const key of accountLoginStates.keys())if(!knownAccounts.has(key))accountLoginStates.delete(key);
+  for(const key of accountLoginRevisions.keys())if(!knownAccounts.has(key))accountLoginRevisions.delete(key);
   const current = activeProfileFor('codex');
   if(previous && (!current || previous.id !== current.id)){
     // Never relabel the previous account's quota as the newly selected account's reading.
@@ -1718,7 +1786,9 @@ accountNode('account-profiles').addEventListener('click',e => {
   const {accountAction,provider,accountId} = button.dataset;
   if(accountAction === 'add'){openProfileDialog(provider);return;}
   if(accountAction === 'key'){openProfileDialog(provider,accountId);return;}
-  const command = {select:'select_provider_account',remove:'remove_provider_account',login:'provider_sign_in'}[accountAction];
+  if(accountAction === 'copy-code'){copyBrowserSigninCode(provider,accountId).catch(e=>{accountNode('profiles-message').textContent=errText(e);});return;}
+  if(accountAction === 'browser-code'){openBrowserCodeDialog(provider,accountId);return;}
+  const command = {select:'select_provider_account',remove:'remove_provider_account',login:'provider_sign_in',reopen:'reopen_provider_sign_in','cancel-login':'cancel_provider_sign_in'}[accountAction];
   if(command) runAccountAction(command,{provider,accountId}).catch(() => {});
 });
 try {
@@ -1728,11 +1798,65 @@ try {
   })).catch(() => {});
   Promise.resolve(window.__TAURI__.event.listen('provider-account-login',e => {
     const state = e.payload;
-    if(!state || typeof state.provider !== 'string' || typeof state.profile_id !== 'string') return;
-    accountLoginStates.set(state.provider + ':' + state.profile_id,{busy:state.busy === true,note:typeof state.note === 'string' ? state.note : ''});
-    renderAccountProfiles(); if(!state.busy) refreshAccountProfiles();
-  })).catch(() => {});
+    if(!state || typeof state.provider !== 'string' || typeof state.profile_id !== 'string')return;
+    const key=state.provider+':'+state.profile_id;accountLoginRevisions.set(key,(accountLoginRevisions.get(key)||0)+1);
+    if(!rememberProviderSignin(state))return;
+    renderAccountProfiles();if(!state.busy)refreshAccountProfiles();
+  })).then(refreshProviderSignins).catch(() => {});
 } catch(e) { /* Read profiles on opening the pane and returning to this window. */ }
+function rememberProviderSignin(state){
+  if(!state || typeof state.provider!=='string' || typeof state.profile_id!=='string')return false;
+  const key=state.provider+':'+state.profile_id,previous=accountLoginStates.get(key);
+  const sequence=Number.isSafeInteger(state.sequence)&&state.sequence>=0?state.sequence:null;
+  if(sequence!==null && previous?.sequence!==null && previous?.sequence!==undefined && previous.sequence>=sequence)return false;
+  accountLoginStates.set(key,{busy:state.busy===true,note:typeof state.note==='string'?state.note.slice(0,500):'',sequence,
+    url:state.busy===true?profileChallengeUrl(state.provider,state.url):'',user_code:state.busy===true?profileChallengeCode(state.user_code):'',
+    expires_at:state.busy===true && typeof state.expires_at==='number' && Number.isFinite(state.expires_at) && state.expires_at>0 && state.expires_at<=8640000000000000?state.expires_at:null});
+  if(!state.busy && browserCodeTarget?.provider===state.provider && browserCodeTarget?.accountId===state.profile_id)closeBrowserCodeDialog();
+  return true;
+}
+async function refreshProviderSignins(){
+  const revisions=new Map(accountLoginRevisions);
+  try{
+    const pending=await invoke('get_provider_sign_in_states');if(!Array.isArray(pending))return;
+    for(const state of pending){
+      if(!state || state.busy!==true || typeof state.provider!=='string' || typeof state.profile_id!=='string')continue;
+      const key=state.provider+':'+state.profile_id;
+      if((accountLoginRevisions.get(key)||0)!==(revisions.get(key)||0))continue;
+      if(accountProfilesState && !accountProviders().some(p=>p.id===state.provider && p.accounts?.some(a=>a.id===state.profile_id)))continue;
+      rememberProviderSignin(state);
+    }
+    renderAccountProfiles();
+  }catch(_){/* Native progress events still work when a pending snapshot cannot be read. */}
+}
+async function copyBrowserSigninCode(provider,accountId){
+  const login = accountLoginStates.get(provider+':'+accountId);
+  if(!login?.busy || !login.user_code)return;
+  if(!navigator.clipboard?.writeText)throw new Error('Select the displayed code and copy it.');
+  await navigator.clipboard.writeText(login.user_code);
+  accountNode('profiles-message').textContent = ui('Sign-in code copied.','Sign-in code copied.');
+}
+function closeBrowserCodeDialog(){
+  accountNode('browser-signin-code').value='';browserCodeTarget=null;accountNode('browser-code-dialog').close();
+}
+function openBrowserCodeDialog(provider,accountId){
+  const login=accountLoginStates.get(provider+':'+accountId);
+  if(provider!=='claude' || !login?.busy || !login.url)return;
+  browserCodeTarget={provider,accountId};accountNode('browser-signin-code').value='';accountNode('browser-code-error').hidden=true;
+  accountNode('browser-code-dialog').showModal();accountNode('browser-signin-code').focus();
+}
+accountNode('btn-browser-code-close').addEventListener('click',closeBrowserCodeDialog);
+accountNode('btn-browser-code-cancel').addEventListener('click',closeBrowserCodeDialog);
+accountNode('browser-code-dialog').addEventListener('close',()=>{accountNode('browser-signin-code').value='';browserCodeTarget=null;});
+accountNode('browser-code-form').addEventListener('submit',async e=>{
+  e.preventDefault();const button=accountNode('btn-browser-code-submit');if(button.disabled || !browserCodeTarget)return;
+  const target={...browserCodeTarget},code=accountNode('browser-signin-code').value.trim();accountNode('browser-signin-code').value='';
+  if(!code || /[\r\n]/.test(code)){accountNode('browser-code-error').textContent=ui('Paste the single code shown by the provider.','Paste the single code shown by the provider.');accountNode('browser-code-error').hidden=false;return;}
+  button.disabled=true;
+  try{await invoke('complete_provider_sign_in',{...target,code});closeBrowserCodeDialog();}
+  catch(error){accountNode('browser-code-error').textContent=errText(error);accountNode('browser-code-error').hidden=false;}
+  finally{button.disabled=false;}
+});
 
 /* ---- Appearance: Show, and App icon -------------------------------------
    Two choices, one command. Hiding both would leave nothing to click, so Rust keeps the tray icon
@@ -2389,7 +2513,9 @@ try {
   })).catch(() => {});
 } catch(e) { /* State is also asked for when the window opens or gets focus. */ }
 setInterval(() => {
-  if(curTab !== 'resets' || document.hidden)return;
+  if(document.hidden)return;
+  if(curTab==='accounts'){renderBrowserSigninClock();return;}
+  if(curTab !== 'resets')return;
   renderResetClock();
   if(globalResetState && !globalResetState.refreshing && validResetTime(globalResetState.next_check_at) && globalResetState.next_check_at<=Date.now())requestGlobalResetRefresh(true);
 },1000);

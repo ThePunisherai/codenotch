@@ -106,6 +106,10 @@ struct Credential {
     org: Option<String>,
     /// ms epoch; only an OAuth sign-in carries one
     expires: Option<u64>,
+    /// OAuth renewal information stays inside the protected native profile.
+    refresh: Option<String>,
+    method_id: Option<String>,
+    auth_client_id: Option<String>,
     source: &'static str,
 }
 
@@ -153,6 +157,9 @@ fn credential_from(entry: &serde_json::Value, source: &'static str) -> Option<Cr
             console: None,
             org: None,
             expires: None,
+            refresh: None,
+            method_id: None,
+            auth_client_id: None,
             source,
         });
     }
@@ -173,6 +180,9 @@ fn credential_from(entry: &serde_json::Value, source: &'static str) -> Option<Cr
             console,
             org,
             expires,
+            refresh: non_empty(obj.get("refresh")),
+            method_id: non_empty(obj.get("methodID")),
+            auth_client_id: non_empty(obj.get("authClientID")),
             source,
         });
     }
@@ -185,6 +195,9 @@ fn credential_from(entry: &serde_json::Value, source: &'static str) -> Option<Cr
         console: None,
         org: None,
         expires: None,
+        refresh: None,
+        method_id: None,
+        auth_client_id: None,
         source,
     })
 }
@@ -323,6 +336,7 @@ pub(crate) fn capture_credential_in(root: &std::path::Path) -> Option<String> {
 fn serialize_credential(c: Credential) -> String {
     if c.oauth {
         serde_json::json!({"type": "oauth", "access": c.token, "expires": c.expires,
+            "refresh": c.refresh, "methodID": c.method_id, "authClientID": c.auth_client_id,
             "metadata": {"orgID": c.org, "server": c.console}})
         .to_string()
     } else {
@@ -548,6 +562,7 @@ fn broadcast(app: &AppHandle, snap: UsageSnapshot, selection: &str) {
 pub fn start(app: AppHandle) {
     std::thread::spawn(move || {
         loop {
+            crate::profile_auth::refresh_opencode_if_due(&app);
             let selection = crate::accounts::selection_key("opencode");
             // Freeze the credential and its cache while account switching is
             // locked. Network I/O then runs without holding the settings lock.
@@ -681,6 +696,11 @@ mod tests {
         assert_eq!(c.org.as_deref(), Some("org_1"));
         assert_eq!(c.console.as_deref(), Some("https://opencode.ai/console"));
         assert_eq!(c.expires, Some(1792854570201));
+        let saved: serde_json::Value = serde_json::from_str(&serialize_credential(c)).unwrap();
+        assert_eq!(saved["refresh"], "rt_x");
+        assert_eq!(saved["methodID"], "device");
+        let reopened = credential_from(&saved, "saved account").unwrap();
+        assert_eq!(reopened.refresh.as_deref(), Some("rt_x"));
     }
 
     #[test]

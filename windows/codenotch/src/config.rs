@@ -137,6 +137,10 @@ pub struct Config {
     /// Public banked-reset lifecycle announcements; never a claim about an account's own balance.
     #[serde(default = "yes")]
     pub banked_reset_notifications: bool,
+    /// One-time activation requested for this fork's v1.25 upgrade. Later notification choices
+    /// are kept; the migration never changes personal reset cards or notification sound.
+    #[serde(default)]
+    pub public_reset_notifications_v125: bool,
     /// false = the reset card above appears silently, with no notification sound.
     #[serde(default = "yes")]
     pub reset_notification_sound: bool,
@@ -197,10 +201,15 @@ fn carry_shared_position(cfg: &mut Config) {
 impl Config {
     /// Where the notch sits along `edge`: centred until it has been slid somewhere on that edge.
     pub fn along(&self, edge: &str) -> f64 {
-        self.notch_along.get(edge).copied().unwrap_or(0.5).clamp(0.0, 1.0)
+        self.notch_along
+            .get(edge)
+            .copied()
+            .unwrap_or(0.5)
+            .clamp(0.0, 1.0)
     }
     pub fn set_along(&mut self, edge: &str, along: f64) {
-        self.notch_along.insert(edge.to_string(), along.clamp(0.0, 1.0));
+        self.notch_along
+            .insert(edge.to_string(), along.clamp(0.0, 1.0));
     }
 }
 
@@ -320,6 +329,7 @@ impl Default for Config {
             reset_notifications: true,
             global_reset_notifications: true,
             banked_reset_notifications: true,
+            public_reset_notifications_v125: true,
             reset_notification_sound: true,
             auto_update: true,
             adaptive_pill: false,
@@ -341,6 +351,7 @@ pub fn load() -> Config {
         .as_deref()
         .and_then(|t| serde_json::from_str(t).ok())
         .unwrap_or_default();
+    enable_public_reset_notifications_v125(&mut cfg);
     keep_open_on_upgrade(&mut cfg, raw.as_deref());
 
     // Migration: before slots existed the notch was a plain provider list, one ring each. That is
@@ -349,7 +360,9 @@ pub fn load() -> Config {
         cfg.notch_slots = cfg
             .notch_providers
             .iter()
-            .map(|p| TraySlot { provider: p.clone() })
+            .map(|p| TraySlot {
+                provider: p.clone(),
+            })
             .collect();
     }
 
@@ -378,6 +391,15 @@ pub fn load() -> Config {
     cfg
 }
 
+fn enable_public_reset_notifications_v125(cfg: &mut Config) {
+    if cfg.public_reset_notifications_v125 {
+        return;
+    }
+    cfg.global_reset_notifications = true;
+    cfg.banked_reset_notifications = true;
+    cfg.public_reset_notifications_v125 = true;
+}
+
 fn migrate_glm_notch(cfg: &mut Config, raw: &Option<String>) {
     let predates = raw
         .as_deref()
@@ -388,7 +410,9 @@ fn migrate_glm_notch(cfg: &mut Config, raw: &Option<String>) {
         return;
     }
     if !cfg.notch_slots.is_empty() && !cfg.notch_slots.iter().any(|s| s.provider == "glm") {
-        cfg.notch_slots.push(TraySlot { provider: "glm".into() });
+        cfg.notch_slots.push(TraySlot {
+            provider: "glm".into(),
+        });
     }
     cfg.glm_notch_fixed = true;
 }
@@ -403,7 +427,9 @@ fn migrate_opencode_notch(cfg: &mut Config, raw: &Option<String>) {
         return;
     }
     if !cfg.notch_slots.is_empty() && !cfg.notch_slots.iter().any(|s| s.provider == "opencode") {
-        cfg.notch_slots.push(TraySlot { provider: "opencode".into() });
+        cfg.notch_slots.push(TraySlot {
+            provider: "opencode".into(),
+        });
     }
     cfg.opencode_notch_fixed = true;
 }
@@ -418,7 +444,9 @@ fn migrate_copilot_notch(cfg: &mut Config, raw: &Option<String>) {
         return;
     }
     if !cfg.notch_slots.is_empty() && !cfg.notch_slots.iter().any(|s| s.provider == "copilot") {
-        cfg.notch_slots.push(TraySlot { provider: "copilot".into() });
+        cfg.notch_slots.push(TraySlot {
+            provider: "copilot".into(),
+        });
     }
     cfg.copilot_notch_fixed = true;
 }
@@ -437,12 +465,14 @@ pub fn save(cfg: &Config) {
 mod tests {
     use super::{
         carry_shared_position, clamp_critical_limit, clamp_watch_limit, color_transition_or_step,
-        keep_open_on_upgrade, snap_scale, theme_or_system, weekly_ring_or_off, Config,
+        enable_public_reset_notifications_v125, keep_open_on_upgrade, snap_scale, theme_or_system,
+        weekly_ring_or_off, Config,
     };
 
     #[test]
     fn reset_switches_default_on_and_round_trip_without_changing_other_settings() {
-        let old: Config = serde_json::from_str(r#"{"notch_visible":false,"theme":"light"}"#).unwrap();
+        let old: Config =
+            serde_json::from_str(r#"{"notch_visible":false,"theme":"light"}"#).unwrap();
         assert!(old.reset_notifications);
         assert!(old.global_reset_notifications);
         assert!(old.banked_reset_notifications);
@@ -450,7 +480,14 @@ mod tests {
         assert!(old.auto_update);
         assert!(!old.notch_visible);
         assert_eq!(old.theme, "light");
-        let chosen = Config { reset_notifications: false, global_reset_notifications: false, banked_reset_notifications: false, reset_notification_sound: false, auto_update: false, ..old };
+        let chosen = Config {
+            reset_notifications: false,
+            global_reset_notifications: false,
+            banked_reset_notifications: false,
+            reset_notification_sound: false,
+            auto_update: false,
+            ..old
+        };
         let saved = serde_json::to_string(&chosen).unwrap();
         let restored: Config = serde_json::from_str(&saved).unwrap();
         assert!(!restored.reset_notifications);
@@ -460,6 +497,31 @@ mod tests {
         assert!(!restored.auto_update);
         assert!(!restored.notch_visible);
         assert_eq!(restored.theme, "light");
+    }
+
+    #[test]
+    fn requested_public_alerts_activate_once_then_keep_later_off_choices() {
+        let mut old: Config = serde_json::from_str(r#"{"global_reset_notifications":false,"banked_reset_notifications":false,"reset_notifications":false,"reset_notification_sound":false,"theme":"light"}"#).unwrap();
+        assert!(!old.public_reset_notifications_v125);
+        enable_public_reset_notifications_v125(&mut old);
+        assert!(old.global_reset_notifications);
+        assert!(old.banked_reset_notifications);
+        assert!(old.public_reset_notifications_v125);
+        assert!(!old.reset_notifications);
+        assert!(!old.reset_notification_sound);
+        assert_eq!(old.theme, "light");
+        old.global_reset_notifications = false;
+        old.banked_reset_notifications = false;
+        let saved = serde_json::to_string(&old).unwrap();
+        let mut next_launch: Config = serde_json::from_str(&saved).unwrap();
+        enable_public_reset_notifications_v125(&mut next_launch);
+        assert!(!next_launch.global_reset_notifications);
+        assert!(!next_launch.banked_reset_notifications);
+        assert!(!next_launch.reset_notifications);
+        assert!(!next_launch.reset_notification_sound);
+        let fresh = Config::default();
+        assert!(fresh.public_reset_notifications_v125);
+        assert!(fresh.global_reset_notifications && fresh.banked_reset_notifications);
     }
 
     /// Show on hover is the Mac's default, so a fresh install gets it — but an update must not start
@@ -472,10 +534,16 @@ mod tests {
 
         let mut upgraded = Config::default();
         keep_open_on_upgrade(&mut upgraded, Some(r#"{"notch_visible":true}"#));
-        assert!(!upgraded.notch_on_hover, "saved before the setting existed: stays open");
+        assert!(
+            !upgraded.notch_on_hover,
+            "saved before the setting existed: stays open"
+        );
 
         for chosen in [true, false] {
-            let mut c = Config { notch_on_hover: chosen, ..Default::default() };
+            let mut c = Config {
+                notch_on_hover: chosen,
+                ..Default::default()
+            };
             keep_open_on_upgrade(&mut c, Some(&format!(r#"{{"notch_on_hover":{chosen}}}"#)));
             assert_eq!(c.notch_on_hover, chosen, "a choice already made is kept");
         }
@@ -488,17 +556,33 @@ mod tests {
         assert_eq!(c.along("right"), 0.5, "an edge never slid along is centred");
         c.set_along("right", 0.2);
         assert_eq!(c.along("right"), 0.2);
-        assert_eq!(c.along("top"), 0.5, "sliding it on the right left the top where it was");
+        assert_eq!(
+            c.along("top"),
+            0.5,
+            "sliding it on the right left the top where it was"
+        );
         c.set_along("top", 7.0);
-        assert_eq!(c.along("top"), 1.0, "and it can never be put past the end of an edge");
+        assert_eq!(
+            c.along("top"),
+            1.0,
+            "and it can never be put past the end of an edge"
+        );
     }
 
     #[test]
     fn the_shared_position_moves_to_the_edge_the_notch_was_on() {
-        let mut c = Config { notch_y: 0.3, notch_edge: "left".into(), ..Default::default() };
+        let mut c = Config {
+            notch_y: 0.3,
+            notch_edge: "left".into(),
+            ..Default::default()
+        };
         carry_shared_position(&mut c);
         assert_eq!(c.along("left"), 0.3, "an existing config keeps its place");
-        assert_eq!(c.along("right"), 0.5, "the edges it was not on start centred");
+        assert_eq!(
+            c.along("right"),
+            0.5,
+            "the edges it was not on start centred"
+        );
         // Once carried over, a later load leaves it alone even though notch_y still reads 0.3
         c.set_along("left", 0.8);
         carry_shared_position(&mut c);
@@ -511,7 +595,11 @@ mod tests {
 
     #[test]
     fn the_shared_position_is_read_but_never_written_again() {
-        let mut v = serde_json::to_value(Config { notch_y: 0.3, ..Default::default() }).unwrap();
+        let mut v = serde_json::to_value(Config {
+            notch_y: 0.3,
+            ..Default::default()
+        })
+        .unwrap();
         assert!(v.get("notch_y").is_none(), "{v}");
         v["notch_y"] = serde_json::json!(0.3);
         let back: Config = serde_json::from_value(v).unwrap();
@@ -546,15 +634,37 @@ mod tests {
     #[test]
     fn watch_and_critical_limits_never_cross() {
         let near = |a: f64, b: f64| (a - b).abs() < 1e-9;
-        assert_eq!(clamp_watch_limit(0.5, 0.7), 0.5, "inside the gap, untouched");
-        assert!(near(clamp_watch_limit(0.9, 0.7), 0.69), "pushed back below critical");
+        assert_eq!(
+            clamp_watch_limit(0.5, 0.7),
+            0.5,
+            "inside the gap, untouched"
+        );
+        assert!(
+            near(clamp_watch_limit(0.9, 0.7), 0.69),
+            "pushed back below critical"
+        );
         assert_eq!(clamp_watch_limit(0.0, 0.7), 0.01, "never below the floor");
-        assert_eq!(clamp_watch_limit(0.5, 0.0), 0.01, "a critical of 0 still leaves a floor");
+        assert_eq!(
+            clamp_watch_limit(0.5, 0.0),
+            0.01,
+            "a critical of 0 still leaves a floor"
+        );
 
-        assert_eq!(clamp_critical_limit(0.7, 0.5), 0.7, "inside the gap, untouched");
-        assert!(near(clamp_critical_limit(0.4, 0.5), 0.51), "pushed back above watch");
+        assert_eq!(
+            clamp_critical_limit(0.7, 0.5),
+            0.7,
+            "inside the gap, untouched"
+        );
+        assert!(
+            near(clamp_critical_limit(0.4, 0.5), 0.51),
+            "pushed back above watch"
+        );
         assert_eq!(clamp_critical_limit(2.0, 0.5), 1.0, "never past 100%");
-        assert_eq!(clamp_critical_limit(0.7, 1.0), 1.0, "a watch of 100% still leaves a ceiling");
+        assert_eq!(
+            clamp_critical_limit(0.7, 1.0),
+            1.0,
+            "a watch of 100% still leaves a ceiling"
+        );
     }
 
     #[test]

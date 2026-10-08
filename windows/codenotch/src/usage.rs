@@ -321,33 +321,61 @@ pub(crate) fn command_names(stem: &str) -> Vec<String> {
 /// The standalone Claude Code command: its own installer's location first, then global npm/pnpm/Volta, then PATH
 pub(crate) fn find_cli() -> Option<std::path::PathBuf> {
     let names = command_names("claude");
+    let dirs = cli_directories();
+    // A native CLI anywhere in the known locations beats a shell shim. Browser
+    // auth needs its own stdin and process lifetime, without shell forwarding.
+    names.into_iter().flat_map(|name| dirs.iter().map(move |dir| dir.join(&name)))
+        .find(|p| p.is_file() && !is_desktop_owned(p))
+}
+
+fn cli_directories() -> Vec<PathBuf> {
     let mut v = Vec::new();
-    let push_all = |dir: std::path::PathBuf, v: &mut Vec<std::path::PathBuf>| {
-        for n in &names {
-            v.push(dir.join(n));
-        }
-    };
     if let Some(h) = dirs::home_dir() {
-        push_all(h.join(".local").join("bin"), &mut v);
+        v.push(h.join(".local").join("bin"));
     }
     if let Some(d) = dirs::config_dir() {
-        push_all(d.join("npm"), &mut v);
+        v.push(d.join("npm"));
     }
     if let Some(d) = dirs::data_local_dir() {
-        push_all(d.join("pnpm"), &mut v);
+        v.push(d.join("pnpm"));
     }
     if let Some(h) = dirs::home_dir() {
-        push_all(h.join(".volta").join("bin"), &mut v);
+        v.push(h.join(".volta").join("bin"));
         // npm's global prefix and nvm's per-version bin are where a Linux install usually lands
-        push_all(h.join(".npm-global").join("bin"), &mut v);
-        push_all(h.join(".bun").join("bin"), &mut v);
+        v.push(h.join(".npm-global").join("bin"));
+        v.push(h.join(".bun").join("bin"));
     }
     if let Some(path) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&path) {
-            push_all(dir, &mut v);
-        }
+        v.extend(std::env::split_paths(&path));
     }
-    v.into_iter().find(|p| p.is_file() && !is_desktop_owned(p))
+    v
+}
+
+pub(crate) fn find_browser_cli() -> Option<PathBuf> {
+    #[cfg(not(windows))] { find_cli() }
+    #[cfg(windows)] {
+        let dirs = cli_directories();
+        let native = dirs.iter().map(|dir| dir.join("claude.exe"));
+        let npm = dirs.iter().flat_map(|dir| npm_native_candidates(dir));
+        native.chain(npm).find(|p| p.is_file() && !is_desktop_owned(p) && has_windows_executable_header(p))
+    }
+}
+
+fn npm_native_candidates(dir: &Path) -> Vec<PathBuf> {
+    let scope = dir.join("node_modules/@anthropic-ai");
+    // The official postinstall copies/hardlinks the optional package binary here.
+    let mut candidates = vec![scope.join("claude-code/bin/claude.exe")];
+    for package in ["claude-code-win32-x64", "claude-code-win32-arm64"] {
+        candidates.push(scope.join(package).join("claude.exe"));
+        candidates.push(scope.join("claude-code/node_modules/@anthropic-ai").join(package).join("claude.exe"));
+    }
+    candidates
+}
+
+fn has_windows_executable_header(path: &Path) -> bool {
+    use std::io::Read;
+    let mut header = [0u8; 2];
+    std::fs::File::open(path).and_then(|mut file| file.read_exact(&mut header)).is_ok() && header == *b"MZ"
 }
 
 /// Whether a launch is worth making. Pure, so every branch is testable without a clock or a subprocess.
@@ -807,6 +835,20 @@ pub fn start(app: AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn npm_placeholder_cannot_be_used_as_a_native_browser_helper() {
+        let root = std::env::temp_dir().join(format!("codenotch-native-auth-{}-{}", std::process::id(), now_ms()));
+        std::fs::create_dir_all(&root).unwrap();
+        let placeholder = root.join("placeholder.exe");
+        let native = root.join("native.exe");
+        std::fs::write(&placeholder, b"echo native binary not installed\n").unwrap();
+        std::fs::write(&native, b"MZfixture-native-header").unwrap();
+        assert!(!has_windows_executable_header(&placeholder));
+        assert!(has_windows_executable_header(&native));
+        assert!(!has_windows_executable_header(&root.join("missing.exe")));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn a_reset_deadline_interrupts_the_normal_refresh_period() {

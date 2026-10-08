@@ -160,6 +160,7 @@ pub struct Store {
     initialized: bool,
     high_watermark_at: u64,
     high_watermark_ids: Vec<String>,
+    global_seen_ids: Vec<String>,
     banked_initialized: bool,
     banked_high_watermark_at: u64,
     banked_latest_id: String,
@@ -170,6 +171,20 @@ pub struct Store {
 impl Store {
     fn observe(&mut self, resets: &[ConfirmedReset], now: u64) -> Option<ConfirmedReset> {
         let newest = resets.first();
+        if self.initialized && self.global_seen_ids.is_empty() {
+            // Upgrade old cursors without replaying the most recent known announcement if the
+            // source later corrects its timestamp. Only confirmed IDs enter this memory.
+            for event in self.snapshot.history.iter().rev() {
+                if !self.global_seen_ids.contains(&event.id) {
+                    self.global_seen_ids.push(event.id.clone());
+                }
+            }
+            for id in &self.high_watermark_ids {
+                if !self.global_seen_ids.contains(id) {
+                    self.global_seen_ids.push(id.clone());
+                }
+            }
+        }
         if !self.initialized {
             self.initialized = true;
             self.high_watermark_at = newest.map(|e| e.announced_at).unwrap_or(now);
@@ -178,11 +193,19 @@ impl Store {
                 .filter(|e| e.announced_at == self.high_watermark_at)
                 .map(|e| e.id.clone())
                 .collect();
+            self.global_seen_ids = resets
+                .iter()
+                .take(256)
+                .rev()
+                .map(|event| event.id.clone())
+                .collect();
             return None;
         }
         let new = resets
             .iter()
-            .find(|e| e.announced_at > self.high_watermark_at)
+            .find(|e| {
+                e.announced_at > self.high_watermark_at && !self.global_seen_ids.contains(&e.id)
+            })
             .cloned();
         if let Some(latest) = newest {
             if latest.announced_at > self.high_watermark_at {
@@ -197,6 +220,15 @@ impl Store {
                     self.high_watermark_ids.push(event.id.clone());
                 }
             }
+        }
+        for event in resets.iter().rev() {
+            if !self.global_seen_ids.contains(&event.id) {
+                self.global_seen_ids.push(event.id.clone());
+            }
+        }
+        if self.global_seen_ids.len() > 256 {
+            self.global_seen_ids
+                .drain(..self.global_seen_ids.len() - 256);
         }
         new
     }
@@ -236,7 +268,16 @@ impl Store {
             banked
                 .iter()
                 .find(|event| {
+                    let prefix = format!("{}:", event.id);
+                    let previous_stage = self
+                        .banked_seen
+                        .iter()
+                        .filter_map(|seen| seen.strip_prefix(&prefix))
+                        .map(|state| banked_stage(Some(state)))
+                        .max();
                     !self.banked_seen.contains(&key(event))
+                        && previous_stage
+                            .is_none_or(|stage| banked_stage(event.banked_state.as_deref()) > stage)
                         && (event.announced_at > self.banked_high_watermark_at
                             || event.announced_at == self.banked_high_watermark_at
                                 && event.id == self.banked_latest_id
@@ -340,6 +381,15 @@ fn banked_state(value: Option<&Value>) -> Option<String> {
         Some("announced" | "arriving" | "available") => v.as_str().unwrap().into(),
         _ => "unknown".into(),
     })
+}
+
+fn banked_stage(state: Option<&str>) -> u8 {
+    match state {
+        Some("available") => 3,
+        Some("arriving") => 2,
+        Some("announced") => 1,
+        _ => 0,
+    }
 }
 
 fn parse_public_event(event: &Value, source: &str, tweet: bool, now: u64) -> Option<PublicEvent> {
@@ -554,7 +604,12 @@ fn merge_events(timeline: &[PublicEvent], feed: Option<&FeedSnapshot>) -> Vec<Pu
             if let Some(event) = events.iter_mut().find(|event| event.id == post.id) {
                 // A feed reply can advance the banked lifecycle before the next timeline build.
                 // It can never promote a live classification into a confirmed automatic reset.
-                if post.kind == "banked" && post.banked_state.as_deref() != Some("unknown") {
+                if post.kind == "banked"
+                    && !post.preview
+                    && post.announced_at >= event.announced_at
+                    && banked_stage(post.banked_state.as_deref())
+                        > banked_stage(event.banked_state.as_deref())
+                {
                     event.kind = "banked".into();
                     event.banked_state = post.banked_state.clone();
                     event.confirmed = false;
@@ -987,6 +1042,7 @@ pub fn set_global_reset_notifications(app: AppHandle, on: bool) -> bool {
         let state = app.state::<AppState>();
         let mut cfg = state.cfg.lock().unwrap();
         cfg.global_reset_notifications = on;
+        cfg.public_reset_notifications_v125 = true;
         crate::config::save(&cfg);
     }
     if !on {
@@ -1007,6 +1063,7 @@ pub fn set_banked_reset_notifications(app: AppHandle, on: bool) -> bool {
         let state = app.state::<AppState>();
         let mut cfg = state.cfg.lock().unwrap();
         cfg.banked_reset_notifications = on;
+        cfg.public_reset_notifications_v125 = true;
         crate::config::save(&cfg);
     }
     if !on {
@@ -1104,6 +1161,41 @@ mod tests {
             .is_none());
         assert!(restarted.observe(&[old], NOW).is_none());
         assert!(restarted.observe(&[new], NOW).is_none());
+    }
+
+    #[test]
+    fn corrected_known_ids_advance_cursor_without_replaying_notifications() {
+        let mut store = Store::default();
+        assert!(store.observe(&[reset("known", 100)], NOW).is_none());
+        assert!(store.observe(&[reset("known", 200)], NOW).is_none());
+        let saved = serde_json::to_string(&store).unwrap();
+        let mut restarted: Store = serde_json::from_str(&saved).unwrap();
+        assert!(restarted.observe(&[reset("known", 300)], NOW).is_none());
+        assert_eq!(
+            restarted.observe(&[reset("new", 400)], NOW).unwrap().id,
+            "new"
+        );
+        let mut upgraded = Store {
+            initialized: true,
+            high_watermark_at: 100,
+            high_watermark_ids: vec!["existing".into()],
+            ..Store::default()
+        };
+        assert!(upgraded.observe(&[reset("existing", 200)], NOW).is_none());
+    }
+
+    #[test]
+    fn bounded_global_memory_retains_the_newest_known_ids() {
+        let mut store = Store::default();
+        let mut initial: Vec<ConfirmedReset> = (0..256)
+            .rev()
+            .map(|n| reset(&format!("old-{n}"), 1000 + n))
+            .collect();
+        assert!(store.observe(&initial, NOW).is_none());
+        initial.insert(0, reset("new", 1300));
+        assert!(store.observe(&initial, NOW).is_some());
+        assert!(store.observe(&[reset("old-255", 2000)], NOW).is_none());
+        assert!(store.global_seen_ids.len() <= 256);
     }
 
     #[test]
@@ -1272,6 +1364,29 @@ mod tests {
                 .as_deref(),
             Some("arriving")
         );
+    }
+
+    #[test]
+    fn banked_feed_previews_or_older_states_cannot_promote_real_cards() {
+        let timeline = vec![banked("grant", 100, "announced")];
+        let mut store = Store::default();
+        assert!(store.observe_banked(&timeline, NOW).is_none());
+        let mut feed = live_feed(false);
+        let mut planned = banked("grant", NOW + 1, "available");
+        planned.preview = true;
+        planned.source = "feed".into();
+        feed.posts = vec![planned];
+        let events = merge_events(&timeline, Some(&feed));
+        assert_eq!(events, timeline);
+        assert!(store.observe_banked(&events, NOW).is_none());
+        let available = vec![banked("grant", 100, "available")];
+        assert!(store.observe_banked(&available, NOW).is_some());
+        feed.posts = vec![banked("grant", 100, "arriving")];
+        assert_eq!(merge_events(&available, Some(&feed)), available);
+        assert!(store.observe_banked(&feed.posts, NOW).is_none());
+        assert!(store
+            .observe_banked(&[banked("grant", 200, "unknown")], NOW)
+            .is_none());
     }
 
     #[test]
