@@ -962,6 +962,12 @@ fn insert_import(
         .iter()
         .find(|r| r.provider == provider && r.source_key.as_deref() == Some(&source_key))
         .cloned();
+    if found
+        .as_ref()
+        .is_some_and(|r| crate::profile_auth::is_busy(provider, &r.id))
+    {
+        return Ok(false);
+    }
     let empty_active = registry
         .active
         .get(provider)
@@ -973,7 +979,8 @@ fn insert_import(
         })
         .filter(|r| {
             let ctx = context(r);
-            native_credential(&ctx.root, provider).is_none()
+            !crate::profile_auth::is_busy(provider, &r.id)
+                && native_credential(&ctx.root, provider).is_none()
                 && !ctx.root.join("credential.dpapi").is_file()
         })
         .cloned();
@@ -1093,8 +1100,7 @@ fn detect_provider_accounts_now(
     // are written outside STORE so slow DPAPI/file operations do not stop
     // ordinary provider metadata reads.
     for (p, source, raw, name) in captures {
-        if registry.accounts.iter().filter(|r| r.provider == p).count()
-            >= MAX_ACCOUNTS_PER_PROVIDER
+        if registry.accounts.iter().filter(|r| r.provider == p).count() >= MAX_ACCOUNTS_PER_PROVIDER
         {
             continue;
         }
@@ -1136,6 +1142,12 @@ fn connect_provider_account_now(
     }
     let _gate = SELECTION.lock().unwrap_or_else(|e| e.into_inner());
     let ctx = profile(&provider, &account_id).ok_or("Account profile not found.")?;
+    if crate::profile_auth::is_busy(&provider, &account_id) {
+        credential.clear();
+        return Err(
+            "Finish or cancel this account's sign-in before replacing its credential.".into(),
+        );
+    }
     let token = credential.trim();
     if token.is_empty() || token.len() > 32 * 1024 || token.chars().any(char::is_control) {
         return Err("Enter a valid API key or GitHub token.".into());
@@ -1182,6 +1194,52 @@ pub fn save_profile_secret(
         let _ = app.emit("accounts-updated", ui_provider(provider));
     }
     Ok(())
+}
+/// Commit a rotating credential only if the same profile still owns the
+/// exact credential used by the caller. The caller performs network I/O
+/// outside this gate. Routine OAuth rotation preserves quota and backoff.
+pub fn replace_profile_secret_if_matches(
+    provider: &str,
+    account_id: &str,
+    expected_raw: &str,
+    new_raw: &str,
+) -> Result<bool, String> {
+    let provider = canonical_provider(provider);
+    checked_provider(provider)?;
+    let _gate = SELECTION.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(ctx) = profile(provider, account_id) else {
+        return Ok(false);
+    };
+    replace_matching_secret_at(&ctx.root, expected_raw, new_raw, || {
+        let mut store = STORE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut registry = read_registry(&mut store).clone();
+        // Persist the revision before exposing the new protected credential;
+        // a settings-write failure leaves the previous credential untouched.
+        bump(&mut registry, provider);
+        write_registry(&mut store, &registry)
+    })
+}
+fn replace_matching_secret_at(
+    root: &Path,
+    expected_raw: &str,
+    new_raw: &str,
+    before_write: impl FnOnce() -> Result<(), String>,
+) -> Result<bool, String> {
+    if new_raw.is_empty() || new_raw.len() > MAX_CREDENTIAL_BYTES {
+        return Err("Invalid credential size.".into());
+    }
+    let Some(current) = load_secret_at(root) else {
+        return Ok(false);
+    };
+    if current != expected_raw {
+        return Ok(false);
+    }
+    if current == new_raw {
+        return Ok(true);
+    }
+    before_write()?;
+    save_secret_at(root, new_raw)?;
+    Ok(true)
 }
 pub fn login_finished(app: &AppHandle, provider: &str, account_id: &str) {
     let provider = canonical_provider(provider);
@@ -1524,10 +1582,8 @@ mod tests {
     #[test]
     fn account_ipc_work_runs_on_a_separate_blocking_thread() {
         let invoking_thread = std::thread::current().id();
-        let worker = tauri::async_runtime::block_on(account_io(|| {
-            Ok(std::thread::current().id())
-        }))
-        .unwrap();
+        let worker =
+            tauri::async_runtime::block_on(account_io(|| Ok(std::thread::current().id()))).unwrap();
         assert_ne!(worker, invoking_thread);
     }
     #[test]
@@ -1536,7 +1592,10 @@ mod tests {
             panic!("fixture worker failure with private diagnostic detail")
         }))
         .unwrap_err();
-        assert_eq!(error, "Account operation could not be completed. Please try again.");
+        assert_eq!(
+            error,
+            "Account operation could not be completed. Please try again."
+        );
         assert!(!error.contains("private diagnostic"));
     }
     #[test]
@@ -1612,6 +1671,31 @@ mod tests {
         assert!(!serde_json::to_string(cache.read(&fixture.path()))
             .unwrap()
             .contains("access_token"));
+    }
+    #[test]
+    #[cfg(windows)]
+    fn rotating_secret_commit_rejects_stale_and_retains_retirement_after_failed_completion() {
+        let fixture = RegistryFixture::new();
+        let root = fixture.path().parent().unwrap().join("rotation");
+        let original = r#"{"access":"fixture-old-access","refresh":"fixture-once"}"#;
+        let retired = r#"{"access":"fixture-old-access","refresh":null,"renewalFailed":true}"#;
+        let renewed = r#"{"access":"fixture-new-access","refresh":"fixture-next"}"#;
+        save_secret_at(&root, original).unwrap();
+        assert!(replace_matching_secret_at(&root, original, retired, || Ok(())).unwrap());
+        assert_eq!(load_secret_at(&root).as_deref(), Some(retired));
+        assert!(
+            !replace_matching_secret_at(&root, original, renewed, || panic!(
+                "stale credential must not mutate revision"
+            ))
+            .unwrap()
+        );
+        assert!(replace_matching_secret_at(&root, retired, renewed, || Err(
+            "fixture settings write failed".into()
+        ))
+        .is_err());
+        assert_eq!(load_secret_at(&root).as_deref(), Some(retired));
+        assert!(replace_matching_secret_at(&root, retired, renewed, || Ok(())).unwrap());
+        assert_eq!(load_secret_at(&root).as_deref(), Some(renewed));
     }
     #[test]
     #[cfg(windows)]

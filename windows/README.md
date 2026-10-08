@@ -102,8 +102,9 @@ tick each second. Opening the tracker or returning to the window requests the
 earliest permitted check; it cannot promise zero source publication delay.
 Banked availability is a public announcement, not a personal grant balance.
 
-Enable global reset cards in the tracker and choose **Test notification** to see
-one immediately. The first successful check establishes a quiet baseline. Later
+Global and banked reset cards are enabled by default; version 1.25 enables both
+once on upgrade for this fork. Later switch changes are preserved. Choose **Test
+notification** to see one immediately. The first successful check establishes a quiet baseline. Later
 confirmed global resets notify once; the cursor is saved across restarts. Personal
 quota cards still depend on a fresh local reading. The app must stay running
 (including in the tray) to poll and display notifications.
@@ -112,8 +113,11 @@ quota cards still depend on a fresh local reading. The app must stay running
 
 Settings has an account manager for every provider: add a named profile, detect
 supported existing sessions, connect it, and choose which account to use. Codex
-and Claude launch their official native CLI login with isolated profile roots.
-Other providers offer their supported CLI, session import or key method. A saved
+and Claude open their official browser login through a hidden installed CLI with
+isolated profile roots. Copilot and Grok show the browser device code in the
+account card. OpenCode uses its documented public device authorization without
+requiring a CLI. Cursor and Antigravity open their app's browser sign-in and
+require a subsequent session import; GLM still requires a dashboard API key. A saved
 credential becomes Connected after a fresh successful usage reading. Selected
 profiles use separate caches and rate-limit waits, and never borrow another
 profile's credentials. Switching clears the displayed quota and its personal
@@ -137,13 +141,14 @@ When Claude is signed out, its card offers **Sign in**, which opens the standalo
 Claude Code CLI's browser login (`claude auth login --claudeai`). Account profiles
 set `CLAUDE_CONFIG_DIR` for that process so each login stays isolated.
 Finish in the browser; if it
-displays a code, paste it in the opened terminal, not in Codenotch. The card
+displays a completion code, paste it in the account's sign-in form. The card
 refreshes after the CLI exits without restarting the widget. The native CLI must
 already be installed; missing CLI, cancellation and launch errors are shown.
 
 This explicit action shares a busy guard with automatic token renewal. Only the
-CLI handles OAuth and writes credentials; Codenotch does not receive login codes
-or expose tokens through UI IPC. The interactive child has a 15-minute timeout.
+CLI handles OAuth and writes credentials. A manually submitted completion code
+is sent once to the hidden child and is never logged or persisted; tokens are
+not exposed through UI IPC. The child has a 15-minute timeout and can be cancelled.
 To read Claude again, click its ring or choose **Refresh now** from the notch's
 right-click menu. HTTP 403 is reported as an access/network refusal rather than claiming
 that a still-valid login has expired. Existing automatic renewal is unchanged.

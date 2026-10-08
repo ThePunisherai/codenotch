@@ -64,7 +64,7 @@
     bottom:calc(-1 * var(--fillet));
     background:radial-gradient(circle at 0 100%, transparent calc(var(--fillet) - 1.5px), var(--edge) calc(var(--fillet) - 0.5px), var(--pill) calc(var(--fillet) + 0.5px));
   }
-  .cell{display:flex;flex-direction:column;align-items:center;gap:7px;min-width:56px}
+  .cell{display:flex;flex-direction:column;align-items:center;gap:7px;min-width:72px}
   /* Extra providers stay inside the existing window instead of creating a larger WebView surface. */
   body[data-edge="top"] #pill.dense-flat,body[data-edge="bottom"] #pill.dense-flat{gap:14px;padding:14px 18px}
   #pill.dense-flat .cell{min-width:44px}
@@ -174,7 +174,7 @@
      than a fixed 78 px column. The card is centred under (or over) the hovered ring by `placeCard`. */
   body[data-edge="top"] #pill,body[data-edge="bottom"] #pill{
     right:auto;left:50%;top:auto;transform:translateX(-50%);
-    flex-direction:row;width:auto;height:auto;padding:14px 24px;
+    flex-direction:row;width:auto;height:auto;padding:14px 28px;gap:22px;
     /* Both ends have a flare here, and each flare's edge line runs on into the pill's own: without this
        one, the far flare's line stopped short at the pill and stood out of it as a stub */
     border-right:1px solid var(--edge);
@@ -1257,7 +1257,7 @@ function drawSvg(element, markup){
 }
 function renderRing(){
   const ps=providers();
-  pill.classList.toggle('dense-flat',!edgeIsVertical() && ps.length>6);
+  pill.classList.toggle('dense-flat',!edgeIsVertical() && ps.length>5);
   pill.classList.toggle('dense-upright',edgeIsVertical() && ps.length>5);
   // Rebuild the DOM only when the structure changes (never swap the element under the cursor)
   const want=ps.map(p=>p.id).join(',');
@@ -1270,7 +1270,7 @@ function renderRing(){
   for(const p of ps){
     const cell=pill.querySelector(`.cell[data-p="${p.id}"]`); if(!cell) continue;
     cell.classList.toggle('compact-upright',edgeIsVertical() && ps.length>5);
-    cell.classList.toggle('compact-flat',!edgeIsVertical() && ps.length>6);
+    cell.classList.toggle('compact-flat',!edgeIsVertical() && ps.length>5);
     const svg=cell.querySelector('svg.ring'), reading=cell.querySelector('svg.reading'), activity=cell.querySelector('svg.activity'), pct=cell.querySelector('.pct'), glyph=cell.querySelector('.glyph'), wrap=cell.querySelector('.ringwrap');
     // Artwork can change without its type changing (a refreshed SVG or user PNG override).
     // Update the mark itself without replacing the hovered cell or its animated rings.
@@ -1718,14 +1718,14 @@ function carryShape(){
   const originalEdge=document.body.dataset.edge, originalVertical=edgeIsVertical();
   const measure=upright=>{
     document.body.dataset.edge=upright?'right':'top';
-    pill.classList.toggle('dense-flat',!upright && n>6);
+    pill.classList.toggle('dense-flat',!upright && n>5);
     pill.classList.toggle('dense-upright',upright && n>5);
     for(const cell of cells){
       cell.classList.toggle('compact-upright',upright && n>5);
-      cell.classList.toggle('compact-flat',!upright && n>6);
+      cell.classList.toggle('compact-flat',!upright && n>5);
     }
     const style=getComputedStyle(pill), gap=parseFloat(style.gap)||18;
-    const cw=cells[0]?cells[0].offsetWidth:56, ch=cells[0]?cells[0].offsetHeight:71;
+    const cw=cells[0]?cells[0].offsetWidth:72, ch=cells[0]?cells[0].offsetHeight:71;
     const padX=parseFloat(style.paddingLeft)+parseFloat(style.paddingRight), padY=parseFloat(style.paddingTop)+parseFloat(style.paddingBottom);
     return {shape:upright?{depth:78,length:padY+n*ch+(n-1)*gap+2,pitch:ch+gap,inset:38.5}
       :{depth:padY+ch+1,length:padX+n*cw+(n-1)*gap+2,pitch:cw+gap,inset:padY/2+ch/2},cells:cells.map(el=>el.outerHTML)};

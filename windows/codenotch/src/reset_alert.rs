@@ -18,6 +18,7 @@ const LABEL: &str = "reset-alert";
 const CARD_W: f64 = 280.0;
 const CARD_H: f64 = 150.0;
 const SHOW_FOR: Duration = Duration::from_secs(6);
+const MAX_PENDING_ALERTS: usize = 32;
 /// Logical px the pill occupies at the notch window's near edge on an upright edge (`#pill` in
 /// notch.html is 78 px wide); used as an approximation of its depth when the notch lies flat too,
 /// since a flat pill's own height is not a fixed constant the way its width is.
@@ -29,9 +30,11 @@ struct QueueState {
     running: bool,
     dismissed: bool,
     active_token: u64,
+    token_sequence: u64,
     active_global: bool,
     active_banked: bool,
     active_provider: Option<String>,
+    active_preview: bool,
 }
 
 enum AlertEvent {
@@ -44,6 +47,53 @@ struct QueuedAlert {
     event: AlertEvent,
     preview: bool,
     selection_key: Option<String>,
+}
+
+impl QueueState {
+    fn next_token(&mut self) -> u64 {
+        self.token_sequence = self.token_sequence.wrapping_add(1).max(1);
+        self.active_token = self.token_sequence;
+        self.active_token
+    }
+
+    fn push(&mut self, queued: QueuedAlert) -> bool {
+        if queued.preview {
+            let same_active = match &queued.event {
+                AlertEvent::Global(_) => self.active_global,
+                AlertEvent::Banked(_) => self.active_banked,
+                AlertEvent::Personal(_) => !self.active_global && !self.active_banked,
+            };
+            let duplicate = self.pending.iter().any(|pending| {
+                pending.preview
+                    && std::mem::discriminant(&pending.event)
+                        == std::mem::discriminant(&queued.event)
+            });
+            if duplicate
+                || self.running && self.active_preview && same_active
+                || self.pending.len() >= MAX_PENDING_ALERTS
+            {
+                return false;
+            }
+        } else if self.pending.len() >= MAX_PENDING_ALERTS {
+            // A source notification has priority over test cards. If every slot is real, keep the
+            // newest updates rather than extending a stale backlog indefinitely.
+            if let Some(index) = self.pending.iter().position(|alert| alert.preview) {
+                self.pending.remove(index);
+            } else {
+                self.pending.pop_front();
+            }
+        }
+        self.pending.push_back(queued);
+        true
+    }
+}
+
+fn enabled(event: &AlertEvent, cfg: &config::Config) -> bool {
+    match event {
+        AlertEvent::Personal(_) => cfg.reset_notifications,
+        AlertEvent::Global(_) => cfg.global_reset_notifications,
+        AlertEvent::Banked(_) => cfg.banked_reset_notifications,
+    }
 }
 
 #[derive(Default)]
@@ -115,11 +165,13 @@ fn enqueue_unchecked(
 ) {
     let queue = &app.state::<AppState>().reset_alerts;
     let mut state = queue.state.lock().unwrap();
-    state.pending.push_back(QueuedAlert {
+    if !state.push(QueuedAlert {
         event,
         preview,
         selection_key,
-    });
+    }) {
+        return;
+    }
     if state.running {
         return;
     }
@@ -137,12 +189,14 @@ fn run(app: AppHandle) {
                 state.running = false;
                 state.active_token = 0;
                 state.active_provider = None;
+                state.active_preview = false;
                 return;
             };
-            state.active_token = state.active_token.wrapping_add(1).max(1);
+            state.next_token();
             state.dismissed = false;
             state.active_global = matches!(&queued.event, AlertEvent::Global(_));
             state.active_banked = matches!(&queued.event, AlertEvent::Banked(_));
+            state.active_preview = queued.preview;
             state.active_provider = match &queued.event {
                 AlertEvent::Personal(event) => Some(event.provider.clone()),
                 _ => None,
@@ -225,6 +279,12 @@ fn show_on_main(
     token: u64,
     preview: bool,
 ) -> Result<bool, String> {
+    if !preview {
+        let state = app.state::<AppState>();
+        if !enabled(&event, &state.cfg.lock().unwrap()) {
+            return Ok(false);
+        }
+    }
     // A switch or disabled notification may dismiss this item before its main-thread task runs.
     if app
         .state::<AppState>()
@@ -657,4 +717,94 @@ pub fn preview_banked(app: AppHandle) -> Result<(), String> {
         None,
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn global(id: &str, preview: bool) -> QueuedAlert {
+        QueuedAlert {
+            event: AlertEvent::Global(crate::global_reset::ConfirmedReset {
+                id: id.into(),
+                announced_at: 100,
+                summary: "Confirmed public reset".into(),
+                url: None,
+                audience: Vec::new(),
+            }),
+            preview,
+            selection_key: None,
+        }
+    }
+
+    #[test]
+    fn pending_cards_are_bounded_and_repeated_previews_do_not_delay_real_updates() {
+        let mut state = QueueState::default();
+        assert!(state.push(global("preview", true)));
+        assert!(!state.push(global("preview-again", true)));
+        for n in 0..MAX_PENDING_ALERTS {
+            assert!(state.push(global(&format!("real-{n}"), false)));
+        }
+        assert_eq!(state.pending.len(), MAX_PENDING_ALERTS);
+        assert!(state.pending.iter().all(|queued| !queued.preview));
+        assert!(!state.push(global("extra-preview", true)));
+        assert!(state.push(global("newest", false)));
+        assert_eq!(state.pending.len(), MAX_PENDING_ALERTS);
+        assert!(
+            matches!(&state.pending.back().unwrap().event, AlertEvent::Global(event) if event.id == "newest")
+        );
+        state.pending.clear();
+        state.running = true;
+        state.active_preview = true;
+        state.active_global = true;
+        assert!(!state.push(global("active-preview-again", true)));
+        assert!(state.push(global("real", false)));
+    }
+
+    #[test]
+    fn late_dismissals_cannot_reuse_a_new_batches_token() {
+        let mut state = QueueState::default();
+        let first = state.next_token();
+        state.active_token = 0;
+        let second = state.next_token();
+        assert_ne!(first, second);
+        assert_eq!(state.active_token, second);
+    }
+
+    #[test]
+    fn public_card_switches_are_independent_from_personal_cards_and_sound() {
+        let mut cfg = config::Config::default();
+        cfg.global_reset_notifications = false;
+        cfg.banked_reset_notifications = false;
+        cfg.reset_notification_sound = false;
+        let global = global("real", false).event;
+        let personal = AlertEvent::Personal(ResetEvent {
+            provider: "codex".into(),
+            window_label: "Weekly".into(),
+            used_fraction: 0.0,
+            next_reset_at: None,
+        });
+        let banked = AlertEvent::Banked(crate::global_reset::PublicEvent {
+            id: "grant".into(),
+            announced_at: 100,
+            kind: "banked".into(),
+            group: "credits".into(),
+            announcement_state: "announced".into(),
+            banked_state: Some("available".into()),
+            confirmed: false,
+            preview: false,
+            summary: "Public availability".into(),
+            url: None,
+            audience: Vec::new(),
+            source: "feed".into(),
+        });
+        assert!(!enabled(&global, &cfg));
+        assert!(!enabled(&banked, &cfg));
+        assert!(enabled(&personal, &cfg));
+        cfg.global_reset_notifications = true;
+        assert!(enabled(&global, &cfg));
+        assert!(!enabled(&banked, &cfg));
+        cfg.banked_reset_notifications = true;
+        assert!(enabled(&banked, &cfg));
+    }
 }

@@ -102,7 +102,9 @@ fn persist_at(path: &Path, s: &UsageSnapshot) {
 
 /// Candidates in order: the native exe inside the global npm package (cleanest — no cmd/node
 /// wrapper) → ~/.codex/bin → codex.exe / codex.cmd on PATH.
-pub fn find_executable() -> Option<PathBuf> {
+pub fn find_executable() -> Option<PathBuf> { executable_candidates().into_iter().find(|p| p.is_file()) }
+
+fn executable_candidates() -> Vec<PathBuf> {
     let mut cands: Vec<PathBuf> = Vec::new();
     if let Some(appdata) = dirs::config_dir() {
         let pkg = appdata.join("npm").join("node_modules").join("@openai").join("codex");
@@ -152,7 +154,7 @@ pub fn find_executable() -> Option<PathBuf> {
             }
         }
     }
-    cands.into_iter().find(|p| p.is_file())
+    cands
 }
 
 // ---------------- Live: the usage endpoint ----------------
@@ -558,9 +560,11 @@ fn native_codex() -> Option<PathBuf> {
             }
         }
     }
-    find_executable().filter(|p| p.extension().and_then(|x| x.to_str())
-        .is_some_and(|x| x.eq_ignore_ascii_case("exe")))
+    executable_candidates().into_iter().find(|p| p.is_file() && (!cfg!(windows)
+        || p.extension().and_then(|x| x.to_str()).is_some_and(|x| x.eq_ignore_ascii_case("exe"))))
 }
+
+pub fn browser_login_available() -> bool { native_codex().is_some() }
 
 fn app_server_snapshot(result: &serde_json::Value) -> Option<UsageSnapshot> {
     // A present multi-bucket map is authoritative: never substitute a legacy Spark bucket
@@ -592,8 +596,12 @@ fn app_server_snapshot(result: &serde_json::Value) -> Option<UsageSnapshot> {
 fn read_app_server(home: &Path) -> Option<UsageSnapshot> {
     use std::io::{BufRead, BufReader, Write};
     use std::process::{Command, Stdio};
-    let mut command = Command::new(native_codex()?);
-    command.arg("app-server").env("CODEX_HOME", home).env_remove("OPENAI_API_KEY").env_remove("CODEX_API_KEY")
+    let executable = native_codex()?;
+    // The official app-server can renew credentials. Serialize it with browser
+    // sign-in so the old and new OAuth sessions cannot rotate the same file.
+    let _auth = try_acquire_login()?;
+    let mut command = Command::new(executable);
+    command.arg("app-server").env("CODEX_HOME", home).env_remove("OPENAI_API_KEY").env_remove("CODEX_API_KEY").env_remove("CODEX_ACCESS_TOKEN")
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
     #[cfg(windows)]
     { use std::os::windows::process::CommandExt; command.creation_flags(0x0800_0000); }
@@ -821,63 +829,101 @@ static LOGIN_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool
 pub fn login_busy() -> bool { LOGIN_BUSY.load(std::sync::atomic::Ordering::Acquire) }
 
 struct LoginGuard;
+fn try_acquire_login() -> Option<LoginGuard> {
+    LOGIN_BUSY.compare_exchange(false, true, std::sync::atomic::Ordering::AcqRel,
+        std::sync::atomic::Ordering::Acquire).ok().map(|_| LoginGuard)
+}
 impl Drop for LoginGuard {
     fn drop(&mut self) { LOGIN_BUSY.store(false, std::sync::atomic::Ordering::Release); }
 }
 
-#[cfg(windows)]
-const LOGIN_SCRIPT: &str = r#"$Host.UI.RawUI.WindowTitle = 'Codenotch - Codex / ChatGPT sign-in'; Write-Host 'Complete sign-in in your browser for this Codenotch account.'; & $env:CODENOTCH_CODEX_CLI -c "cli_auth_credentials_store='file'" login; $loginResult = $LASTEXITCODE; if ($loginResult -eq 0) { Write-Host 'Sign-in complete. Codenotch will refresh automatically.'; Start-Sleep -Seconds 2 } else { Write-Host 'Sign-in failed or cancelled. Retry from Codenotch.'; Start-Sleep -Seconds 8 }; exit $loginResult"#;
-
-#[cfg(not(windows))]
-const LOGIN_SH: &str = "echo 'Complete sign-in in your browser for this Codenotch account.'; \"$CODENOTCH_CODEX_CLI\" -c \"cli_auth_credentials_store='file'\" login; r=$?; if [ $r -eq 0 ]; then echo 'Sign-in complete. Codenotch will refresh automatically.'; sleep 2; else echo 'Sign-in failed or cancelled. Retry from Codenotch.'; sleep 8; fi; exit $r";
-
+// The native official client opens the browser and owns its OAuth callback.
 fn login_command(cli: &Path, root: &Path) -> Result<std::process::Command, String> {
-    use std::process::Command;
+    use std::process::{Command, Stdio};
     #[cfg(windows)]
-    let mut cmd = {
-        use std::os::windows::process::CommandExt;
-        let windows = std::env::var_os("SystemRoot").ok_or("Windows directory unavailable.")?;
-        let mut cmd = Command::new(PathBuf::from(windows).join("System32/WindowsPowerShell/v1.0/powershell.exe"));
-        cmd.args(["-NoLogo", "-NoProfile", "-Command", LOGIN_SCRIPT]);
-        cmd.creation_flags(0x0000_0010); // Visible console only after the settings button is clicked.
-        cmd
-    };
-    #[cfg(not(windows))]
-    let mut cmd = {
-        let terminal = crate::claude_auth::terminal_emulator().ok_or("No terminal emulator found. Run codex login yourself.")?;
-        let mut cmd = Command::new(terminal);
-        cmd.args(["-e", "sh", "-c", LOGIN_SH]);
-        cmd
-    };
-    cmd.env("CODENOTCH_CODEX_CLI", cli).env("CODEX_HOME", root)
-        .env_remove("OPENAI_API_KEY").env_remove("CODEX_API_KEY");
+    if !cli.extension().and_then(|s| s.to_str()).is_some_and(|s| s.eq_ignore_ascii_case("exe")) {
+        return Err("Install the current native Codex CLI to use secure browser sign-in.".into());
+    }
+    let mut cmd = Command::new(cli);
+    cmd.args(["-c", "cli_auth_credentials_store='file'", "login"]);
+    cmd.env("CODEX_HOME", root).env_remove("OPENAI_API_KEY").env_remove("CODEX_API_KEY")
+        .env_remove("CODEX_ACCESS_TOKEN").env("NO_COLOR", "1")
+        .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     cmd.current_dir(root);
+    #[cfg(windows)] { use std::os::windows::process::CommandExt; cmd.creation_flags(0x0800_0000); }
     Ok(cmd)
 }
 
+static PENDING_LOGIN: std::sync::Mutex<Option<(String, std::sync::Arc<std::sync::atomic::AtomicBool>, std::sync::Arc<std::sync::atomic::AtomicBool>)>> = std::sync::Mutex::new(None);
+
+pub fn cancel_login(profile_id: &str) -> Result<(), String> {
+    cancel_login_inner(None, profile_id)
+}
+
+pub fn cancel_profile_login(app: &AppHandle, profile_id: &str) -> Result<(), String> {
+    cancel_login_inner(Some(app), profile_id)
+}
+
+fn cancel_login_inner(app: Option<&AppHandle>, profile_id: &str) -> Result<(), String> {
+    let pending = PENDING_LOGIN.lock().unwrap_or_else(|e| e.into_inner());
+    let (_, cancelled, active) = pending.as_ref().filter(|(id, _, _)| id == profile_id)
+        .ok_or("No browser sign-in is running for this account.")?;
+    cancelled.store(true, std::sync::atomic::Ordering::Release);
+    active.store(false, std::sync::atomic::Ordering::Release);
+    if let Some(app) = app {
+        crate::profile_auth::clear_browser_challenge("codex", profile_id);
+        crate::claude_auth::emit_profile_login(app, "codex", profile_id, true, "Cancelling browser sign-in…");
+    }
+    Ok(())
+}
+
+pub fn cancel_all_logins() {
+    let running = {
+        let pending = PENDING_LOGIN.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, cancelled, active)) = pending.as_ref() {
+            active.store(false, std::sync::atomic::Ordering::Release);
+            cancelled.store(true, std::sync::atomic::Ordering::Release);
+            true
+        } else { false }
+    };
+    if running {
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while login_busy() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
 pub fn login_profile(app: &AppHandle, profile_id: &str, root: PathBuf) -> Result<(), String> {
-    let cli = native_codex().or_else(find_executable)
-        .ok_or("Codex CLI not found. Install the official Codex CLI first.")?;
+    let cli = native_codex().ok_or("Native Codex CLI not found. Install the current official CLI for browser sign-in.")?;
     std::fs::create_dir_all(&root).map_err(|_| "Unable to create the account directory.")?;
-    LOGIN_BUSY.compare_exchange(false, true, std::sync::atomic::Ordering::AcqRel,
-        std::sync::atomic::Ordering::Acquire).map_err(|_| "Codex sign-in is already running.")?;
-    let guard = LoginGuard;
-    let mut child = login_command(&cli, &root)?.spawn().map_err(|_| "Unable to open Codex sign-in window.")?;
+    let guard = try_acquire_login().ok_or("Codex sign-in or token renewal is already running.")?;
+    let before = crate::claude_auth::credential_stamp(&root, &["auth.json"]);
+    let mut child = login_command(&cli, &root)?.spawn().map_err(|_| "Unable to start secure Codex browser sign-in.")?;
     let app = app.clone();
     let profile_id = profile_id.to_owned();
-    crate::claude_auth::emit_profile_login(&app, "codex", &profile_id, true, "Complete sign-in in your browser.");
+    let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let active = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    *PENDING_LOGIN.lock().unwrap_or_else(|e| e.into_inner()) = Some((profile_id.clone(), cancelled.clone(), active.clone()));
+    crate::claude_auth::emit_profile_login(&app, "codex", &profile_id, true, "Opening browser. Complete sign-in there.");
+    crate::claude_auth::watch_browser_output(&app, "codex", &profile_id, &mut child, active.clone());
     std::thread::spawn(move || {
-        let ok = crate::claude_auth::wait_child(&mut child, Duration::from_secs(15 * 60));
+        let ok = crate::claude_auth::wait_child_cancel(&mut child, Duration::from_secs(15 * 60), &cancelled);
+        active.store(false, std::sync::atomic::Ordering::Release);
+        crate::profile_auth::clear_browser_challenge("codex", &profile_id);
+        PENDING_LOGIN.lock().unwrap_or_else(|e| e.into_inner()).take();
         let signed_in = ok && load_credential_in(&root).is_some();
-        let note = if signed_in { "Sign-in complete. Refreshing usage..." } else {
-            "Sign-in cancelled, failed or timed out. Try again."
-        };
-        drop(guard);
-        if signed_in { crate::accounts::login_finished(&app, "codex", &profile_id); }
-        crate::claude_auth::emit_profile_login(&app, "codex", &profile_id, false, note);
+        let note = if signed_in { "Sign-in complete. Refreshing usage..." }
+            else if cancelled.load(std::sync::atomic::Ordering::Acquire) { "Browser sign-in cancelled." }
+            else { "Browser sign-in failed or expired. Update Codex and try again." };
+        if signed_in || before != crate::claude_auth::credential_stamp(&root, &["auth.json"]) {
+            crate::accounts::login_finished(&app, "codex", &profile_id);
+        }
         if crate::accounts::active("codex").is_some_and(|p| p.id == profile_id) {
             NATIVE_RETRY_AFTER.store(0, std::sync::atomic::Ordering::Relaxed);
         }
+        crate::claude_auth::emit_profile_login(&app, "codex", &profile_id, false, note);
+        drop(guard);
         request_refresh();
     });
     Ok(())
@@ -963,16 +1009,16 @@ mod tests {
     }
 
     #[test]
-    #[cfg(windows)]
     fn sign_in_paths_and_account_root_are_environment_data() {
-        let cli = Path::new(r"C:\fixture with spaces\O'Brien\codex.cmd");
+        let cli = Path::new(r"C:\fixture with spaces\O'Brien\codex.exe");
         let root = Path::new(r"C:\fixture with spaces\profiles\work");
         let cmd = login_command(cli, root).unwrap();
-        assert!(cmd.get_args().all(|a| !a.to_string_lossy().contains("O'Brien")));
+        assert_eq!(cmd.get_program(), cli.as_os_str());
+        assert_eq!(cmd.get_args().collect::<Vec<_>>(), ["-c", "cli_auth_credentials_store='file'", "login"]);
+        assert_eq!(cmd.get_current_dir(), Some(root));
         assert!(cmd.get_envs().any(|(k, v)| k == "CODEX_HOME" && v == Some(root.as_os_str())));
-        assert!(cmd.get_envs().any(|(k, v)| k == "CODENOTCH_CODEX_CLI" && v == Some(cli.as_os_str())));
         assert!(cmd.get_envs().any(|(k, v)| k == "OPENAI_API_KEY" && v.is_none()));
-        assert!(LOGIN_SCRIPT.contains("cli_auth_credentials_store='file'"));
+        assert!(cmd.get_envs().any(|(k, v)| k == "CODEX_ACCESS_TOKEN" && v.is_none()));
     }
 
     #[test]

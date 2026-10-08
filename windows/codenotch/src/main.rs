@@ -44,7 +44,7 @@ use tauri::{AppHandle, Emitter, Manager};
 /// and its tail on the left. `fitZoom` in ui/notch.html divides by the same width.
 pub const NOTCH_W: f64 = 376.0;
 /// Hand-bumped build tag, written to run.log at startup so a log can always be matched to the exe that wrote it.
-pub const BUILD: &str = "r37-account-ui-fix";
+pub const BUILD: &str = "r38-browser-login";
 /// The notch window's long side: the upright window's height, and both sides of the flat one.
 ///
 /// Five cells make a 447 px pill; its fillets add 38.7 px at each end and the settings orb reaches
@@ -1878,6 +1878,10 @@ fn main() {
             accounts::detect_provider_accounts,
             accounts::connect_provider_account,
             profile_auth::provider_sign_in,
+            profile_auth::get_provider_sign_in_states,
+            profile_auth::reopen_provider_sign_in,
+            profile_auth::cancel_provider_sign_in,
+            profile_auth::complete_provider_sign_in,
             updater::get_update_state,
             updater::check_for_update,
             updater::install_update,
@@ -2031,8 +2035,15 @@ fn main() {
             }
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("Codenotch failed to start");
+        .build(tauri::generate_context!())
+        .expect("Codenotch failed to start")
+        .run(|_app, event| {
+            if matches!(event, tauri::RunEvent::ExitRequested { .. }) {
+                codex::cancel_all_logins();
+                claude_auth::cancel_all_logins();
+                profile_auth::cancel_all_logins();
+            }
+        });
 }
 
 #[cfg(test)]
@@ -2105,13 +2116,13 @@ mod tests {
     }
 
     #[test]
-    fn a_flat_notch_fits_wide_six_and_dense_eight_providers() {
+    fn a_flat_notch_fits_wide_five_and_dense_eight_providers() {
         let endcaps = 2.0 * (38.7 + 28.5);
-        let wide_six = 6.0 * 56.0 + 5.0 * 18.0 + 48.0 + endcaps;
+        let wide_five = 5.0 * 72.0 + 4.0 * 22.0 + 56.0 + endcaps;
         let dense_eight = 8.0 * 44.0 + 7.0 * 14.0 + 36.0 + endcaps;
         for edge in ["top", "bottom"] {
             let (w, h) = notch_window_size(edge);
-            assert!(w >= wide_six && w >= dense_eight, "{edge}: {w} px clips the pill or its orb");
+            assert!(w >= wide_five && w >= dense_eight, "{edge}: {w} px clips the pill or its orb");
             // `#card`'s max-height on a flat edge is the window less 150 px for the pill, the 30 px
             // gap and the margins, and the tallest card the page has measured is 400 px.
             assert!(h - 150.0 >= 400.0, "{edge}: {h} px leaves the card too little room");

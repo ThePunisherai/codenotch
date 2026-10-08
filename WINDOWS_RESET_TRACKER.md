@@ -16,21 +16,22 @@ Public endpoints are checked concurrently every 60 seconds, measured from the st
 
 ## Multiple accounts
 
-Open **Settings → Accounts**. Add a named profile, choose **Sign in** or **Connect**, and select **Use** to display its quota. **Detect existing** imports supported existing local CLI/editor sessions into separate profiles. Account selection immediately clears the previous account's displayed quota and requests a fresh reading. Usage caches, rate-limit waits and personal-reset baselines belong to each profile; switching accounts does not count as a reset.
+Open **Settings → Accounts**. Add a named profile, choose **Browser sign-in** or **Connect**, and select **Use** to display its quota. Finish sign-in in your browser, choosing the account you want for that profile. Device flows show a short code beside the account. You can reopen the sign-in page or cancel without opening a terminal. If Claude's browser returns a completion code, paste it into the account's sign-in form. **Detect existing** imports supported existing local CLI/editor sessions into separate profiles. Account selection immediately clears the previous account's displayed quota and requests a fresh reading. Usage caches, rate-limit waits and personal-reset baselines belong to each profile; switching accounts does not count as a reset.
 
 | Provider | Connect method |
 |---|---|
-| Codex / Claude | Official native CLI login in an isolated profile directory; supported existing CLI credential files can also be imported. |
-| Antigravity / Cursor | Import a supported existing local session. Antigravity may also use the installed official CLI. Browser login alone does not expose a session to Codenotch. |
-| GitHub Copilot | Official GitHub CLI device login in an isolated profile, or connect a supported token. |
-| GLM / OpenCode | Connect the appropriate provider key; supported OpenCode sessions can be detected. |
-| Grok | Official Grok CLI browser login in an isolated profile, or import its existing session; only supported issuer credentials are used. |
+| Codex / Claude | Official installed CLI opens browser login while running hidden, with an isolated profile directory. Existing CLI credentials can also be imported. |
+| Antigravity / Cursor | Open the installed app and use its browser sign-in, then detect the session. Separate saved imports are supported; the apps do not offer Codenotch an isolated usage-session web grant. |
+| GitHub Copilot | Official GitHub CLI web/device login in an isolated profile, or connect a supported token. |
+| GLM | Open the provider dashboard and connect the appropriate API key. Website sign-in does not provide a usage API credential. |
+| OpenCode | Official public OAuth device flow in the browser, without needing the CLI. Provider keys and detected sessions remain supported. |
+| Grok | Official Grok CLI device login in the browser in an isolated profile, or import an existing supported-issuer session. |
 
 The account registry contains profile metadata, not tokens. Imported desktop credentials and entered keys are protected with current-user Windows DPAPI; official CLIs manage their own profile auth files. Secrets never appear in account-list responses. A saved credential is marked **Connected** only after a successful fresh usage reading. Removing a profile removes its app-owned credentials without signing out the original CLI/editor installation.
 
 ## Notifications
 
-Enable **Global reset notifications** on the Reset Tracker tab to receive the new announcement card. **Test notification** lets you see it immediately. The card's source button opens `https://codex-reset.com/`.
+**Global reset notifications** and **Banked update notifications** are enabled by default. Version 1.25 enables both once for existing installations, as requested for this fork; switches changed afterwards stay respected. **Test notification** lets you see a card immediately. The card's source button opens `https://codex-reset.com/`.
 
 Banked update notifications have a separate switch and preview. They report a public update and ask you to check availability in your account. They never claim that a banked grant has been credited personally.
 
