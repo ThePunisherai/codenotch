@@ -1335,7 +1335,25 @@ document.getElementById('close').addEventListener('click', () => {
 const ORDER = ['claude', 'codex', 'glm', 'opencode', 'cursor', 'grok', 'copilot', 'gemini'];
 const FALLBACK_LABEL = { claude:'Claude', codex:'Codex', glm:'z.ai', opencode:'OpenCode', cursor:'Cursor', grok:'Grok', copilot:'GitHub Copilot', gemini:'Antigravity' };
 let options = [];      // [{id,label,status,used}] from get_tray_options
-let glyphs = {};       // id -> {kind:'svg'|'png'|'appicon', svg, url}
+let glyphs = window.__CN_GLYPHS__ || {}; // id -> {kind:'svg'|'png'|'appicon', svg, url}
+// PROVIDER_GLYPH_STATE_START
+let glyphRevision = 0;
+function applyGlyphs(snapshot){
+  if(!snapshot || typeof snapshot !== 'object')return;
+  glyphs = snapshot;
+  renderAccounts();
+  renderAccountProfiles();
+}
+function receiveGlyphs(event){
+  glyphRevision++;
+  applyGlyphs(event.payload);
+}
+async function refreshGlyphs(){
+  const revision = glyphRevision;
+  const snapshot = await call('get_glyphs', undefined, null);
+  if(revision === glyphRevision)applyGlyphs(snapshot);
+}
+// PROVIDER_GLYPH_STATE_END
 function providerList(){
   return options.length ? options : ORDER.map(id => ({ id, label:FALLBACK_LABEL[id], status:'' }));
 }
@@ -1516,6 +1534,20 @@ function profileElement(tag, className, text){
   if(text !== undefined) node.textContent = text;
   return node;
 }
+function profileProviderGlyph(provider){
+  const id = provider.id === 'antigravity' ? 'gemini' : provider.id;
+  const artwork = glyphs[id];
+  const node = profileElement('span','glyph');
+  // Only the native glyph cache contains SVG markup. Provider/account labels remain textContent.
+  if(artwork && artwork.kind === 'svg' && artwork.svg)node.innerHTML = artwork.svg;
+  else if(artwork && artwork.url){
+    const image = profileElement('img'); image.src = artwork.url; image.alt = '';
+    node.appendChild(image);
+  }else{
+    node.className = 'glyph letter'; node.textContent = (provider.label || provider.id).charAt(0).toUpperCase();
+  }
+  return node;
+}
 function profileButton(label, action, provider, accountId, extraClass){
   const button = profileElement('button', 'btn' + (extraClass ? ' ' + extraClass : ''), ui(label, label));
   button.type = 'button'; button.dataset.accountAction = action; button.dataset.provider = provider;
@@ -1544,7 +1576,7 @@ function renderAccountProfiles(){
     const box = profileElement('div','profile-provider');
     const head = profileElement('div','profile-provider-head');
     const title = profileElement('div','profile-provider-title');
-    title.appendChild(profileElement('span','glyph letter',(provider.label || provider.id).charAt(0).toUpperCase()));
+    title.appendChild(profileProviderGlyph(provider));
     title.appendChild(profileElement('span','',provider.label || provider.id)); head.appendChild(title);
     head.appendChild(profileElement('span','profile-capability',{cli:'CLI sign-in',desktop:'App connection',api_key:'API key'}[provider.login_mode] || 'Provider connection'));
     box.appendChild(head);
@@ -2452,7 +2484,7 @@ function boot(){
       renderAccounts();
     }),
     call('get_antigravity_prefs', undefined, null).then(v => { if(v && typeof v === 'object'){ agPrefs = v; renderAccounts(); } }),
-    call('get_glyphs', undefined, null).then(g => { if(g && typeof g === 'object'){ glyphs = g; renderAccounts(); } }),
+    refreshGlyphs(),
     call('get_scale', undefined, null).then(v => { if(typeof v === 'number') notchSize = v; renderSize(); }),
     call('get_notch_edge', undefined, null).then(v => { if(typeof v === 'string') notchEdge = v; renderEdge(); }),
     refreshScreens(),
@@ -2477,7 +2509,7 @@ function boot(){
     weeklyDashed.refresh(),
     hooks.refresh()
   ];
-  try { window.__TAURI__.event.listen('glyphs', e => { if(e.payload){ glyphs = e.payload; renderAccounts(); } }); } catch(e) { /* the letters stay */ }
+  try { window.__TAURI__.event.listen('glyphs', receiveGlyphs).catch(() => {}); } catch(e) { /* the letters stay */ }
   // The window stays hidden until this first state is drawn (settings_window.rs), so it opens already
   // translated and with every switch where it belongs. A read that hangs holds it back 1.5 s at most.
   Promise.race([Promise.allSettled(first), new Promise(r => setTimeout(r, 1500))])

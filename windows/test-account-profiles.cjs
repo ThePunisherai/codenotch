@@ -11,17 +11,20 @@ const snapshot={providers:[{id:'codex',label:'Codex',login_mode:'cli',login_avai
   {id:'p1',provider:'codex',label:'Work',identity:'sample@example.invalid',status:'saved',source:'local',active:true},
   {id:'p2',provider:'codex',label:'Personal',status:'needsAuth',source:'local',active:false},
 ]}]};
-function page(invokeOverride){
+function page(invokeOverride,artwork={}){
   const nodes=new Map(),calls=[],listeners={};
   function element(tag='div'){
     return {tag,children:[],style:{},dataset:{},attributes:{},handlers:{},value:'',textContent:'',open:false,
-      set innerHTML(_){throw new Error('Profile metadata must remain plain text');},
+      set innerHTML(markup){
+        if(this.className!=='glyph'||!markup.startsWith('<svg'))throw new Error('Profile metadata must remain plain text');
+        this.svgMarkup=markup;
+      },
       setAttribute(k,v){this.attributes[k]=v;},appendChild(node){this.children.push(node);if(tag==='select'&&!this.value)this.value=node.value;},
       replaceChildren(...children){this.children=children;},addEventListener(k,v){this.handlers[k]=v;},focus(){this.focused=true;},
       showModal(){this.open=true;},close(){this.open=false;this.handlers.close?.();}};
   }
   const node=id=>{if(!nodes.has(id))nodes.set(id,element(id==='profile-provider'?'select':'div'));return nodes.get(id);};
-  const context=vm.createContext({document:{getElementById:node,createElement:element},Date:Clock,Map,ui:(_,fallback)=>fallback,
+  const context=vm.createContext({document:{getElementById:node,createElement:element},Date:Clock,Map,glyphs:artwork,ui:(_,fallback)=>fallback,
     invoke:(cmd,args)=>{calls.push([cmd,args]);return invokeOverride?invokeOverride(cmd,args):Promise.resolve(snapshot);},
     codexResetState:{windows:[{label:'Old account usage'}]},codexResetRevision:0,refreshCodexResets(){context.codexRefreshed=true;},
     renderResetTracker(){},errText:e=>String(e.message||e),window:{__TAURI__:{event:{listen(name,callback){listeners[name]=callback;return Promise.resolve();}}}}});
@@ -80,4 +83,38 @@ test('login progress is profile-specific and does not mark credentials as connec
   assert.equal(nodes.filter(n=>n.textContent==='Signing in…').length,1);
   assert.ok(nodes.some(n=>n.textContent==='Credentials saved'));
   assert.ok(!nodes.some(n=>n.textContent==='Connected'));
+});
+test('all built-in provider brand marks remain available in the multiple-account settings cards',()=>{
+  const ids=['claude','codex','cursor','grok','copilot','gemini','opencode'];
+  const artwork=Object.fromEntries(ids.map(id=>[id,{kind:'svg',svg:readFileSync(join(__dirname,'codenotch/glyphs',id+'.svg'),'utf8')}]));
+  const view=page(undefined,artwork);
+  view.render({providers:ids.map(id=>({id:id==='gemini'?'antigravity':id,label:id,accounts:[]}))});
+  const marks=flat(view.node('account-profiles')).filter(n=>n.svgMarkup);
+  assert.equal(marks.length,7);
+  assert.deepEqual(marks.map(n=>n.svgMarkup),ids.map(id=>artwork[id].svg));
+  assert.ok(marks.every(n=>n.className==='glyph'),'brand marks never fall back to initial-letter tiles');
+});
+test('account settings preserve user bitmap glyph overrides and use a letter only when no artwork exists',()=>{
+  const view=page(undefined,{codex:{kind:'png',url:'data:image/png;base64,fixture'}});
+  const mark=view.context.profileProviderGlyph({id:'codex',label:'Codex'});
+  assert.equal(mark.children[0].tag,'img');
+  assert.equal(mark.children[0].src,'data:image/png;base64,fixture');
+  const fallback=view.context.profileProviderGlyph({id:'glm',label:'z.ai'});
+  assert.equal(fallback.className,'glyph letter');assert.equal(fallback.textContent,'Z');
+});
+test('a fresh native glyph event redraws both settings account views and wins over a late empty read',async()=>{
+  let finishRead,legacyDraws=0;
+  const view=page();
+  view.render(snapshot);
+  view.context.call=()=>new Promise(resolve=>{finishRead=resolve;});
+  view.context.renderAccounts=()=>{legacyDraws++;};
+  const glyphState=html.split('// PROVIDER_GLYPH_STATE_START')[1].split('// PROVIDER_GLYPH_STATE_END')[0];
+  vm.runInContext(glyphState,view.context);
+  const reading=view.context.refreshGlyphs();
+  const svg=readFileSync(join(__dirname,'codenotch/glyphs/codex.svg'),'utf8');
+  view.context.receiveGlyphs({payload:{codex:{kind:'svg',svg}}});
+  finishRead({});await reading;
+  assert.equal(legacyDraws,1);
+  assert.equal(view.context.glyphs.codex.svg,svg);
+  assert.ok(flat(view.node('account-profiles')).some(n=>n.svgMarkup===svg));
 });

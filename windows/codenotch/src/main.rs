@@ -44,7 +44,7 @@ use tauri::{AppHandle, Emitter, Manager};
 /// and its tail on the left. `fitZoom` in ui/notch.html divides by the same width.
 pub const NOTCH_W: f64 = 376.0;
 /// Hand-bumped build tag, written to run.log at startup so a log can always be matched to the exe that wrote it.
-pub const BUILD: &str = "r36-lean-auto-update";
+pub const BUILD: &str = "r37-account-ui-fix";
 /// The notch window's long side: the upright window's height, and both sides of the flat one.
 ///
 /// Five cells make a 447 px pill; its fillets add 38.7 px at each end and the settings orb reaches
@@ -486,12 +486,14 @@ fn get_usage(state: tauri::State<AppState>) -> usage::UsageSnapshot {
 }
 
 #[tauri::command]
-fn claude_sign_in(app: AppHandle) -> Result<(), String> {
-    if let Some(profile) = accounts::active("claude") {
-        profile_auth::provider_sign_in(app, "claude".into(), profile.id)
-    } else {
-        claude_auth::start_login()
-    }
+async fn claude_sign_in(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Some(profile) = accounts::active("claude") {
+            profile_auth::provider_sign_in_now(app, "claude".into(), profile.id)
+        } else {
+            claude_auth::start_login()
+        }
+    }).await.map_err(|_| "Unable to start sign-in. Please retry.".to_string())?
 }
 
 #[tauri::command]
@@ -1449,43 +1451,16 @@ pub fn apply_visibility(app: &AppHandle) {
     let _ = app.emit("ui_flags", flags);
     if let Some(w) = app.get_webview_window("notch") {
         if notch {
-            set_webview_memory_target(&w, false);
             let _ = w.show();
             place_notch(app);
         } else {
             let _ = w.hide();
-            set_webview_memory_target(&w, true);
         }
     }
     if let Some(t) = app.tray_by_id("main") {
         let _ = t.set_visible(tray_on);
     }
 }
-
-/// Hidden notch pages keep receiving native quota events while WebView2 releases disposable
-/// caches. Restore normal mode before showing; hover folding remains an active visible window.
-#[cfg(windows)]
-fn set_webview_memory_target(window: &tauri::WebviewWindow, inactive: bool) {
-    use windows_core::Interface;
-    use webview2_com::Microsoft::Web::WebView2::Win32::{
-        ICoreWebView2_19, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW,
-        COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL,
-    };
-    let _ = window.with_webview(move |platform| unsafe {
-        if let Ok(core) = platform.controller().CoreWebView2() {
-            if let Ok(memory) = core.cast::<ICoreWebView2_19>() {
-                let _ = memory.SetMemoryUsageTargetLevel(if inactive {
-                    COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW
-                } else {
-                    COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL
-                });
-            }
-        }
-    });
-}
-
-#[cfg(not(windows))]
-fn set_webview_memory_target(_: &tauri::WebviewWindow, _: bool) {}
 
 // ---------------- settings that used to live in the tray menu ----------------
 
@@ -1821,6 +1796,7 @@ fn adopt_system_proxy() {
 }
 
 fn main() {
+    std::panic::set_hook(Box::new(|info| applog(&format!("fatal panic: {info}"))));
     #[cfg(windows)]
     adopt_system_proxy();
     let args: Vec<String> = std::env::args().collect();
@@ -1866,6 +1842,8 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri::plugin::Builder::<tauri::Wry>::new("provider-glyphs")
+            .js_init_script(glyphs::initialization_script()).build())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // Opening Codenotch again while it runs brings Settings forward, as on the Mac: with the
             // tray icon hidden it is the way back. Logged too, for a rebuild that was not picked up.
@@ -1885,7 +1863,7 @@ fn main() {
             antigravity: Mutex::new(antigravity::load_persisted()),
             glm: Mutex::new(glm::load_persisted()),
             opencode: Mutex::new(opencode::load_persisted()),
-            glyphs: Mutex::new(Default::default()),
+            glyphs: Mutex::new(glyphs::builtin()),
             activity: Mutex::new(Vec::new()),
         })
         .invoke_handler(tauri::generate_handler![

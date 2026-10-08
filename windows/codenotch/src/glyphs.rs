@@ -39,6 +39,21 @@ const BUILTIN: [(&str, &str); 7] = [
     ("opencode", include_str!("../glyphs/opencode.svg")),
 ];
 
+/// Brand artwork is available before account, disk or IPC work completes.
+/// User overrides are collected in the background and replace these defaults.
+pub fn builtin() -> HashMap<String, Glyph> {
+    BUILTIN.iter().map(|(id, svg)| ((*id).into(), Glyph {
+        kind: "svg".into(),
+        svg: (*svg).into(),
+        source: "built-in · @lobehub/icons-static-svg 1.95.0 (MIT)".into(),
+        ..Default::default()
+    })).collect()
+}
+
+pub fn initialization_script() -> String {
+    format!("window.__CN_GLYPHS__ = {};", serde_json::to_string(&builtin()).unwrap())
+}
+
 /// Minimal SVG sanitising before inlining into the DOM: drop <script> blocks and on*="…" event
 /// attributes (the built-in files have none; this guards user files). Every slice position comes
 /// from an ASCII pattern match and lands on a character boundary, so non-ASCII content is safe.
@@ -318,4 +333,32 @@ pub fn probe() -> String {
         });
     }
     lines.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn original_brands_are_ready_without_disk_or_account_work() {
+        let glyphs = builtin();
+        assert_eq!(glyphs.len(), IDS.len());
+        for (id, artwork) in BUILTIN {
+            let glyph = &glyphs[id];
+            assert_eq!(glyph.kind, "svg");
+            assert_eq!(glyph.svg, artwork);
+            assert!(glyph.svg.contains("<svg"));
+        }
+    }
+
+    #[test]
+    fn first_page_script_receives_the_original_brands() {
+        let script = initialization_script();
+        let data = script.strip_prefix("window.__CN_GLYPHS__ = ").unwrap().strip_suffix(';').unwrap();
+        let glyphs: serde_json::Value = serde_json::from_str(data).unwrap();
+        assert_eq!(glyphs.as_object().unwrap().len(), IDS.len());
+        for (id, artwork) in BUILTIN {
+            assert_eq!(glyphs[id]["svg"], artwork);
+        }
+    }
 }

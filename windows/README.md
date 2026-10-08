@@ -232,8 +232,9 @@ npx @tauri-apps/cli@2 build --config tauri.bundle.conf.json
 
 The notch stays small without loading a frontend framework. Hidden windows skip repeated UI work;
 reset countdowns update existing elements instead of rebuilding history and quota cards. Settings
-and reset notification windows are destroyed when closed. On supported WebView2 runtimes, hiding
-the notch requests the low-memory target and showing it restores the normal target.
+and reset notification windows are destroyed when closed. Provider logos are embedded before the first page script runs. Account commands run on blocking
+workers, and building account views releases the registry lock before reading credentials. The
+WebView2 low-memory target introduced in 1.24.0 is removed for compatibility.
 
 Account polling reuses a bounded, nonsecret registry cache, while file metadata still detects
 external edits and permission changes. Activity readers target a 256 KiB SQLite page cache per

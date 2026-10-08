@@ -52,3 +52,40 @@ test('a late usage IPC response cannot repopulate the previous account quota aft
   resolve({status:'ok',fetched_at:NOW,windows:[{label:'Old account quota'}]});await reading;
   assert.equal(ctx.codexSnap.windows.length,0);
 });
+test('the notch retains newer provider artwork when a delayed initial IPC read contains an empty cache',async()=>{
+  let finishRead,draws=0;
+  const ctx=vm.createContext({glyphs:{},invoke:()=>new Promise(resolve=>{finishRead=resolve;}),
+    renderRing(){draws++;},renderCard(){},card:{classList:{contains:()=>false}}});
+  const glyphState=html.split('// PROVIDER_GLYPH_STATE_START')[1].split('// PROVIDER_GLYPH_STATE_END')[0];
+  vm.runInContext(glyphState,ctx);
+  const reading=ctx.refreshGlyphs();
+  const svg=readFileSync(join(__dirname,'codenotch/glyphs/codex.svg'),'utf8');
+  ctx.receiveGlyphs({payload:{codex:{kind:'svg',svg}}});
+  finishRead({});await reading;
+  assert.equal(ctx.glyphs.codex.svg,svg);assert.equal(draws,1);
+});
+test('the notch updates changed SVG and bitmap artwork without replacing the hovered provider cell',()=>{
+  let cellRebuilds=0,glyphWrites=0;
+  const element=()=>({innerHTML:'',classList:{toggle(){}},textContent:''});
+  const nodes=Object.fromEntries(['svg.ring','svg.reading','svg.activity','.pct','.glyph','.ringwrap'].map(id=>[id,element()]));
+  Object.defineProperty(nodes['.glyph'],'innerHTML',{get(){return this.markup;},set(markup){glyphWrites++;this.markup=markup;}});
+  const cell={classList:{toggle(){}},querySelector:selector=>nodes[selector]};
+  const pill={dataset:{cells:'codex'},classList:{toggle(){}},querySelector:()=>cell,
+    set innerHTML(_){cellRebuilds++;}};
+  const p={id:'codex',base:'codex',name:'Codex',glyph:'Cx',snap:{status:'ok',windows:[]}};
+  const first=readFileSync(join(__dirname,'codenotch/glyphs/codex.svg'),'utf8');
+  const replacement=readFileSync(join(__dirname,'codenotch/glyphs/claude.svg'),'utf8');
+  const ctx=vm.createContext({glyphs:{codex:{kind:'svg',svg:first}},pill,providers:()=>[p],edgeIsVertical:()=>false,
+    headlineOf:()=>null,weeklyRing:'off',refreshing:{},workState:()=> 'idle',staleOf:()=>false,reportHot(){},HOLE:'#000',TRACK:'#333'});
+  vm.runInContext(html.slice(html.indexOf('function glyphHtml('),html.indexOf('// Provider table')),ctx);
+  vm.runInContext(html.slice(html.indexOf('function drawSvg('),html.indexOf('\nfunction resetCopy(')),ctx);
+  ctx.renderRing();assert.equal(nodes['.glyph'].innerHTML,`<span class="mark">${first}</span>`);
+  ctx.glyphs.codex={kind:'svg',svg:replacement};ctx.renderRing();
+  assert.equal(nodes['.glyph'].innerHTML,`<span class="mark">${replacement}</span>`);
+  ctx.glyphs.codex={kind:'png',url:'data:image/png;base64,first'};ctx.renderRing();
+  ctx.glyphs.codex={kind:'png',url:'data:image/png;base64,replacement'};ctx.renderRing();
+  assert.match(nodes['.glyph'].innerHTML,/base64,replacement/);
+  ctx.renderRing();
+  assert.equal(glyphWrites,4,'unchanged artwork does not recreate the SVG on every reading');
+  assert.equal(cellRebuilds,0,'the hovered cell and animation nodes keep their identity');
+});
