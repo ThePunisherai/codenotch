@@ -78,7 +78,14 @@ pub fn capability(provider: &str) -> (&'static str, bool, &'static str) {
     }
 }
 #[tauri::command]
-pub fn provider_sign_in(
+pub async fn provider_sign_in(
+    app: AppHandle,
+    provider: String,
+    account_id: String,
+) -> Result<(), String> {
+    crate::accounts::account_io(move || provider_sign_in_now(app, provider, account_id)).await
+}
+pub(crate) fn provider_sign_in_now(
     app: AppHandle,
     provider: String,
     account_id: String,

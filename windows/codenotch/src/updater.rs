@@ -49,7 +49,9 @@ struct GithubAsset {
 }
 
 static STATE: Mutex<Option<UpdateState>> = Mutex::new(None);
-/// One parked, small-stack timer; no polling loop or retained HTTP client.
+/// One parked timer; no polling loop or retained HTTP client. Threads keep the
+/// standard stack reserve: Windows commits pages as needed, while native TLS,
+/// the async runtime and event delivery retain their normal stack headroom.
 static SCHEDULE: (Mutex<Option<Instant>>, Condvar) = (Mutex::new(None), Condvar::new());
 
 fn state() -> std::sync::MutexGuard<'static, Option<UpdateState>> {
@@ -331,7 +333,6 @@ pub fn check_for_update(app: AppHandle) {
     let worker_app = app.clone();
     if std::thread::Builder::new()
         .name("codenotch-update-check".into())
-        .stack_size(512 * 1024)
         .spawn(move || run_check(&worker_app))
         .is_err()
     {
@@ -433,7 +434,6 @@ fn start_install(app: AppHandle, known: Option<Update>, automatic: bool) {
     let worker_offered = offered.clone();
     if std::thread::Builder::new()
         .name("codenotch-update-install".into())
-        .stack_size(512 * 1024)
         .spawn(move || run_install(&worker_app, &worker_offered, known, automatic))
         .is_err()
     {
@@ -464,7 +464,6 @@ pub fn check_on_launch(app: &AppHandle) {
     let app = app.clone();
     let _ = std::thread::Builder::new()
         .name("codenotch-update-timer".into())
-        .stack_size(128 * 1024)
         .spawn(move || loop {
             let mut deadline = SCHEDULE.0.lock().unwrap_or_else(|e| e.into_inner());
             loop {

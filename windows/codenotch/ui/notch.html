@@ -413,7 +413,26 @@ let glmSnap={status:'absent',windows:[],fetched_at:0,note:''};
 // OpenCode Go plan, read with OpenCode's own sign-in; absent until OpenCode is installed
 let opencodeSnap={status:'absent',windows:[],fetched_at:0,note:''};
 let agSnap={status:'absent',windows:[],fetched_at:0,note:''};
-let glyphs={}; // id → {kind:'mark'|'appicon', url}
+let glyphs=window.__CN_GLYPHS__||{}; // id → {kind:'svg'|'png'|'appicon', svg, url}
+// PROVIDER_GLYPH_STATE_START
+let glyphRevision=0;
+function applyGlyphs(snapshot){
+  if(!snapshot||typeof snapshot!=='object')return;
+  glyphs=snapshot;
+  renderRing();
+  if(card.classList.contains('show'))renderCard();
+}
+function receiveGlyphs(event){
+  glyphRevision++;
+  applyGlyphs(event.payload);
+}
+async function refreshGlyphs(){
+  const revision=glyphRevision;
+  const snapshot=await invoke('get_glyphs');
+  // The initial read may carry an empty cache. A newer collection event owns the artwork.
+  if(revision===glyphRevision)applyGlyphs(snapshot);
+}
+// PROVIDER_GLYPH_STATE_END
 let activity=[]; // working state of the non-Claude providers: {provider,state:'busy'|'waiting',name,detail,since}
 /* Which screen edge the notch is pinned to. Rust owns it (it is what placed the window); the page is
    told so it can mirror or rotate itself to match. 'right' is the default and the pre-edge layout. */
@@ -1241,7 +1260,7 @@ function renderRing(){
   pill.classList.toggle('dense-flat',!edgeIsVertical() && ps.length>6);
   pill.classList.toggle('dense-upright',edgeIsVertical() && ps.length>5);
   // Rebuild the DOM only when the structure changes (never swap the element under the cursor)
-  const want=ps.map(p=>p.id+':'+(glyphs[p.base]?glyphs[p.base].kind:'-')).join(',');
+  const want=ps.map(p=>p.id).join(',');
   if(pill.dataset.cells!==want){
     pill.innerHTML=ps.map((p,i)=>`<div class="cell" data-p="${p.id}" style="--i:${i}">
       <div class="ringwrap"><svg class="ring" viewBox="0 0 56 56"></svg><svg class="reading" viewBox="0 0 56 56"></svg><svg class="activity" viewBox="0 0 56 56"></svg><div class="glyph ${(!glyphs[p.base]&&p.glyph.length>1)?'small':''}">${glyphHtml(p)}</div></div>
@@ -1253,6 +1272,10 @@ function renderRing(){
     cell.classList.toggle('compact-upright',edgeIsVertical() && ps.length>5);
     cell.classList.toggle('compact-flat',!edgeIsVertical() && ps.length>6);
     const svg=cell.querySelector('svg.ring'), reading=cell.querySelector('svg.reading'), activity=cell.querySelector('svg.activity'), pct=cell.querySelector('.pct'), glyph=cell.querySelector('.glyph'), wrap=cell.querySelector('.ringwrap');
+    // Artwork can change without its type changing (a refreshed SVG or user PNG override).
+    // Update the mark itself without replacing the hovered cell or its animated rings.
+    drawSvg(glyph,glyphHtml(p));
+    glyph.classList.toggle('small',!glyphs[p.base]&&p.glyph.length>1);
     const h=headlineOf(p.snap,p.base);
     let inner=`<circle cx="28" cy="28" r="22" fill="${HOLE}"/><circle cx="28" cy="28" r="25" fill="none" stroke="${TRACK}" stroke-width="5"/>`;
     wrap.classList.toggle('pressed',!!refreshing[p.id]);
@@ -2211,10 +2234,10 @@ listen('watch_limit',e=>{if(typeof e.payload==='number'){watchLimit=e.payload;re
 invoke('get_critical_limit').then(v=>{if(typeof v==='number'){criticalLimit=v;renderRing();}}).catch(()=>{});
 listen('critical_limit',e=>{if(typeof e.payload==='number'){criticalLimit=e.payload;renderRing();}}).catch(()=>{});
 listen('antigravity_prefs',e=>{if(e.payload){agPrefs=e.payload;renderRing();}}).catch(()=>{});
-listen('glyphs',e=>{glyphs=e.payload||glyphs;renderRing();if(card.classList.contains('show'))renderCard();}).catch(()=>{});
+listen('glyphs',receiveGlyphs).catch(()=>{});
 listen('activity',e=>{activity=e.payload||activity;renderRing();if(card.classList.contains('show'))renderCard();}).catch(()=>{});
 invoke('get_activity').then(a=>{activity=a||activity;renderRing();}).catch(()=>{});
-invoke('get_glyphs').then(g=>{glyphs=g||glyphs;renderRing();}).catch(()=>{});
+refreshGlyphs().catch(()=>{});
 // The edge: pushed on every placement (a drag that snapped elsewhere, or Settings), and asked for once
 // at startup in case the placement happened before this page was listening.
 listen('notch_edge',e=>applyEdge(e.payload)).catch(()=>{});
@@ -2237,6 +2260,8 @@ setInterval(async()=>{
     }
   }catch(_){} // Local IPC only; no network requests and no automatic browser launch.
 },2000);
+// Paint the configured artwork/fallback immediately; slow native reads must not leave an empty notch.
+renderRing();
 </script>
 </body>
 </html>

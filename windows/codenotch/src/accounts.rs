@@ -751,13 +751,50 @@ fn snapshot(registry: &Registry) -> AccountsSnapshot {
         ProviderAccounts { id: ui_provider(p).into(), label: crate::provider_label(p).into(), login_mode: mode.into(), login_available: available && !registry.broken, login_note: if registry.broken { "Saved account settings could not be read. Profiles are preserved and external login fallback is disabled.".into() } else { note.into() }, manual_key_available: matches!(*p,"glm"|"copilot"|"opencode") && !registry.broken, accounts: registry.accounts.iter().filter(|r| &r.provider == p).map(|r| view(r, registry)).collect(), active_account_id: registry.active.get(*p).cloned() }
     }).collect() }
 }
+
+/// Credential reads, DPAPI and executable discovery can wait on Windows or a
+/// network PATH entry. Keep that work off the UI thread and never include a
+/// worker panic or a credential value in the IPC error.
+pub(crate) async fn account_io<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|_| "Account operation could not be completed. Please try again.".to_string())?
+}
+
+/// Copy only nonsecret metadata under STORE. Building a view can read files,
+/// decrypt credentials and discover installed applications without holding
+/// the registry lock needed by every provider's polling loop.
+fn with_owned_registry<T>(
+    store: &Mutex<RegistryCache>,
+    path: &Path,
+    render: impl FnOnce(&Registry) -> T,
+) -> T {
+    let registry = {
+        let mut cache = store.lock().unwrap_or_else(|e| e.into_inner());
+        cache.read(path).clone()
+    };
+    render(&registry)
+}
+
+fn list_provider_accounts_now() -> AccountsSnapshot {
+    with_owned_registry(&STORE, &registry_path(), snapshot)
+}
+
 #[tauri::command]
-pub fn list_provider_accounts() -> AccountsSnapshot {
-    let mut store = STORE.lock().unwrap_or_else(|e| e.into_inner());
-    snapshot(read_registry(&mut store))
+pub async fn list_provider_accounts() -> Result<AccountsSnapshot, String> {
+    account_io(|| Ok(list_provider_accounts_now())).await
 }
 #[tauri::command]
-pub fn add_provider_account(
+pub async fn add_provider_account(
+    app: AppHandle,
+    provider: String,
+    label: String,
+) -> Result<AccountView, String> {
+    account_io(move || add_provider_account_now(app, provider, label)).await
+}
+fn add_provider_account_now(
     app: AppHandle,
     provider: String,
     label: String,
@@ -775,7 +812,7 @@ pub fn add_provider_account(
         created_at: crate::now_ms(),
     };
     private_dir(&context(&record).root)?;
-    let result = {
+    let registry = {
         let mut store = STORE.lock().unwrap_or_else(|e| e.into_inner());
         let mut registry = read_registry(&mut store).clone();
         if registry
@@ -791,13 +828,21 @@ pub fn add_provider_account(
         registry.accounts.push(record.clone());
         bump(&mut registry, &provider);
         write_registry(&mut store, &registry)?;
-        view(&record, &registry)
+        registry
     };
     changed(&app, &provider);
-    Ok(result)
+    drop(_gate);
+    Ok(view(&record, &registry))
 }
 #[tauri::command]
-pub fn select_provider_account(
+pub async fn select_provider_account(
+    app: AppHandle,
+    provider: String,
+    account_id: String,
+) -> Result<AccountsSnapshot, String> {
+    account_io(move || select_provider_account_now(app, provider, account_id)).await
+}
+fn select_provider_account_now(
     app: AppHandle,
     provider: String,
     account_id: String,
@@ -820,10 +865,18 @@ pub fn select_provider_account(
         write_registry(&mut store, &registry)?;
     }
     changed(&app, &provider);
-    Ok(list_provider_accounts())
+    drop(_gate);
+    Ok(list_provider_accounts_now())
 }
 #[tauri::command]
-pub fn remove_provider_account(
+pub async fn remove_provider_account(
+    app: AppHandle,
+    provider: String,
+    account_id: String,
+) -> Result<AccountsSnapshot, String> {
+    account_io(move || remove_provider_account_now(app, provider, account_id)).await
+}
+fn remove_provider_account_now(
     app: AppHandle,
     provider: String,
     account_id: String,
@@ -856,7 +909,8 @@ pub fn remove_provider_account(
     if deletion.is_err() {
         return Err("Profile removed, but its files could not be deleted. Close its sign-in window and delete the unused profile directory.".into());
     }
-    Ok(list_provider_accounts())
+    drop(_gate);
+    Ok(list_provider_accounts_now())
 }
 fn fingerprint(text: &str) -> String {
     // Stable identifier, not encryption; this value never authenticates anything.
@@ -962,7 +1016,13 @@ fn insert_import(
     Ok(true)
 }
 #[tauri::command]
-pub fn detect_provider_accounts(
+pub async fn detect_provider_accounts(
+    app: AppHandle,
+    provider: Option<String>,
+) -> Result<AccountsSnapshot, String> {
+    account_io(move || detect_provider_accounts_now(app, provider)).await
+}
+fn detect_provider_accounts_now(
     app: AppHandle,
     provider: Option<String>,
 ) -> Result<AccountsSnapshot, String> {
@@ -1025,28 +1085,43 @@ pub fn detect_provider_accounts(
     }
     let _gate = SELECTION.lock().unwrap_or_else(|e| e.into_inner());
     let mut changed_providers = std::collections::BTreeSet::new();
+    let mut registry = {
+        let mut store = STORE.lock().unwrap_or_else(|e| e.into_inner());
+        read_registry(&mut store).clone()
+    };
+    // SELECTION still serializes all profile mutations. Imported credentials
+    // are written outside STORE so slow DPAPI/file operations do not stop
+    // ordinary provider metadata reads.
+    for (p, source, raw, name) in captures {
+        if registry.accounts.iter().filter(|r| r.provider == p).count()
+            >= MAX_ACCOUNTS_PER_PROVIDER
+        {
+            continue;
+        }
+        if insert_import(&mut registry, &p, &source, &raw, name.as_deref())? {
+            changed_providers.insert(p);
+        }
+    }
     {
         let mut store = STORE.lock().unwrap_or_else(|e| e.into_inner());
-        let mut registry = read_registry(&mut store).clone();
-        for (p, source, raw, name) in captures {
-            if registry.accounts.iter().filter(|r| r.provider == p).count()
-                >= MAX_ACCOUNTS_PER_PROVIDER
-            {
-                continue;
-            }
-            if insert_import(&mut registry, &p, &source, &raw, name.as_deref())? {
-                changed_providers.insert(p);
-            }
-        }
         write_registry(&mut store, &registry)?;
     }
     for p in changed_providers {
         changed(&app, &p);
     }
-    Ok(list_provider_accounts())
+    drop(_gate);
+    Ok(list_provider_accounts_now())
 }
 #[tauri::command]
-pub fn connect_provider_account(
+pub async fn connect_provider_account(
+    app: AppHandle,
+    provider: String,
+    account_id: String,
+    credential: String,
+) -> Result<AccountsSnapshot, String> {
+    account_io(move || connect_provider_account_now(app, provider, account_id, credential)).await
+}
+fn connect_provider_account_now(
     app: AppHandle,
     provider: String,
     account_id: String,
@@ -1081,7 +1156,8 @@ pub fn connect_provider_account(
     // The caller gets no token echo, including on validation and native errors.
     credential.clear();
     changed(&app, &provider);
-    Ok(list_provider_accounts())
+    drop(_gate);
+    Ok(list_provider_accounts_now())
 }
 pub fn save_profile_secret(
     app: &AppHandle,
@@ -1402,6 +1478,66 @@ mod tests {
         bump(&mut r, "codex");
         assert_eq!(r.generation["codex"], 2);
         assert!(!r.generation.contains_key("claude"));
+    }
+    #[test]
+    fn slow_account_view_does_not_hold_registry_or_block_new_metadata() {
+        use std::sync::{mpsc, Arc};
+        use std::time::Duration;
+
+        let fixture = RegistryFixture::new();
+        let mut registry = Registry::default();
+        registry.accounts = vec![record("p123", "codex"), record("p456", "codex")];
+        registry.active.insert("codex".into(), "p123".into());
+        fixture.save(&registry);
+        let store = Arc::new(Mutex::new(RegistryCache { entry: None }));
+        let worker_store = store.clone();
+        let path = fixture.path();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            with_owned_registry(&worker_store, &path, |captured| {
+                // Model credential or PATH I/O that does not complete promptly.
+                started_tx.send(()).unwrap();
+                resume_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                key_for(captured, "codex")
+            })
+        });
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let registry_was_free = store.try_lock().is_ok();
+        // Resume before asserting so a regression never leaves a parked worker.
+        if !registry_was_free {
+            resume_tx.send(()).unwrap();
+            let _ = worker.join();
+            panic!("Account view retained STORE while waiting for credential I/O");
+        }
+        registry.active.insert("codex".into(), "p456".into());
+        bump(&mut registry, "codex");
+        fixture.save(&registry);
+        assert_eq!(
+            with_owned_registry(&store, &fixture.path(), |latest| key_for(latest, "codex")),
+            "p456:1"
+        );
+        resume_tx.send(()).unwrap();
+        // The old view owns a coherent copy rather than borrowing the new login.
+        assert_eq!(worker.join().unwrap(), "p123:0");
+    }
+    #[test]
+    fn account_ipc_work_runs_on_a_separate_blocking_thread() {
+        let invoking_thread = std::thread::current().id();
+        let worker = tauri::async_runtime::block_on(account_io(|| {
+            Ok(std::thread::current().id())
+        }))
+        .unwrap();
+        assert_ne!(worker, invoking_thread);
+    }
+    #[test]
+    fn failed_account_worker_returns_generic_error_without_panicking_caller() {
+        let error = tauri::async_runtime::block_on(account_io(|| -> Result<(), String> {
+            panic!("fixture worker failure with private diagnostic detail")
+        }))
+        .unwrap_err();
+        assert_eq!(error, "Account operation could not be completed. Please try again.");
+        assert!(!error.contains("private diagnostic"));
     }
     #[test]
     fn cached_registry_detects_external_replacement_and_keeps_account_revisions() {
